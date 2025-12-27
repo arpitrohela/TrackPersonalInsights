@@ -33,21 +33,3 @@ Press ? for help in the application.
 ![Screenshot 9](Screenshots/Screenshot%20from%202025-12-27%2019-11-56.png)
 
 ![Screenshot 10](Screenshots/Screenshot%20from%202025-12-27%2019-12-07.png)
-
-![Screenshot 2](Screenshots/Screenshot%20from%202025-12-27%2019-10-58.png)
-
-![Screenshot 3](Screenshots/Screenshot%20from%202025-12-27%2019-11-06.png)
-
-![Screenshot 4](Screenshots/Screenshot%20from%202025-12-27%2019-11-15.png)
-
-![Screenshot 5](Screenshots/Screenshot%20from%202025-12-27%2019-11-22.png)
-
-![Screenshot 6](Screenshots/Screenshot%20from%202025-12-27%2019-11-29.png)
-
-![Screenshot 7](Screenshots/Screenshot%20from%202025-12-27%2019-11-36.png)
-
-![Screenshot 8](Screenshots/Screenshot%20from%202025-12-27%2019-11-46.png)
-
-![Screenshot 9](Screenshots/Screenshot%20from%202025-12-27%2019-11-56.png)
-
-![Screenshot 10](Screenshots/Screenshot%20from%202025-12-27%2019-12-07.png)
