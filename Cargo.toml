@@ -1,0 +1,22 @@
+[package]
+name = "TrackPersonalInsights"
+version = "1.11.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["clock", "serde"] }
+crossterm = "0.27"
+ratatui = "0.26"
+uuid = { version = "1.6", features = ["v4"] }
+syntect = "5.1"
+regex = "1.10"
+open = "5.0"
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+dirs = "5.0"
+tui-textarea = "0.1"
+strsim = "0.10"
+csv = "1.3"
+serde_json = "1.0"
+viuer = { version = "0.7", features = ["sixel"], optional = true }

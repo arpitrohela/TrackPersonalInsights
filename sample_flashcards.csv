@@ -1,0 +1,6 @@
+front_text,back_text,card_type,collection
+"What is Rust?","A systems programming language focused on safety and speed",basic,CS Basics
+"Borrow checker purpose?","Prevents data races and dangling references",basic,CS Basics
+"Cloze example {{c1:OS}}?","Operating System",cloze,CS Basics
+"MC: HTTP status for Not Found?","404",mc,Web
+"Single-field quoted example","all_good,basic,DeckOne"

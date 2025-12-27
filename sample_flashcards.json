@@ -1,0 +1,26 @@
+[
+  {
+    "front": "What is Rust?",
+    "back": "A systems programming language focused on safety and speed",
+    "card_type": "basic",
+    "collection": "CS Basics"
+  },
+  {
+    "front": "Cloze example {{c1:ownership}}?",
+    "back": "ownership",
+    "card_type": "cloze",
+    "collection": "CS Basics"
+  },
+  {
+    "front": "HTTP status for Not Found?",
+    "back": "404",
+    "card_type": "mc",
+    "collection": "Web"
+  },
+  {
+    "front": "Case-insensitive type",
+    "back": "Still works even if upper-case",
+    "card_type": "BASIC",
+    "collection": "Misc"
+  }
+]
