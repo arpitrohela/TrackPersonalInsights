@@ -3,6 +3,8 @@
 
 set -e
 
+export PATH="$HOME/.cargo/bin:$PATH"
+
 echo "=== TrackPersonalInsights Build Script ==="
 echo "Building release binary for Linux..."
 

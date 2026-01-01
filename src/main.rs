@@ -1750,7 +1750,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
 
         for (line_idx, line) in lines.iter().enumerate() {
             let mut col = 0;
-            for word in line.split(|c: char| !c.is_alphabetic()) {
+            for word in line.split(|c: char| !c.is_alphanumeric()) {
                 if !word.is_empty() && word.len() > 1 {
                     let word_lower = word.to_lowercase();
                     // Skip if in custom dictionary
@@ -4864,11 +4864,19 @@ fn textarea_lines_with_cursor(app: &App, height: u16) -> Vec<Line<'static>> {
 
     for (idx, line) in text_lines.iter().enumerate() {
         if idx == cursor_row {
-            let col = cursor_col.min(line.len());
-            let mut line_with_cursor = line.clone();
-            line_with_cursor.insert(col, '|');
+            let char_col = cursor_col.min(line.chars().count());
+            let mut new_line = String::new();
+            for (i, c) in line.chars().enumerate() {
+                if i == char_col {
+                    new_line.push('|');
+                }
+                new_line.push(c);
+            }
+            if char_col == line.chars().count() {
+                new_line.push('|');
+            }
             lines.push(Line::from(Span::styled(
-                line_with_cursor,
+                new_line,
                 Style::default().fg(Color::Yellow).bg(Color::Rgb(30, 30, 40)),
             )));
         } else if app.selection_all {
