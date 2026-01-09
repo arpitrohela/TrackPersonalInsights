@@ -40,7 +40,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, BorderType, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, BorderType, Clear, List, ListItem, Paragraph, Wrap, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
 use std::collections::{BTreeSet, HashSet};
 use tui_textarea::{CursorMove, Input, Key, TextArea};
@@ -935,6 +935,7 @@ struct App {
 
     // Content scrolling (Notes view)
     content_scroll: u16,
+    textarea_scroll: u16, // Scroll position for textarea editor
 
     // Selection state for editing
     selection_all: bool,
@@ -1231,6 +1232,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             search_btn: Rect::default(),
             search_result_items: Vec::new(),
             content_scroll: 0,
+            textarea_scroll: 0,
             selection_all: false,
             editing_cursor_line: 0,
             editing_cursor_col: 0,
@@ -2679,6 +2681,15 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         let (row, col) = app.textarea.cursor();
         app.editing_cursor_line = row;
         app.editing_cursor_col = col;
+        
+        // Update textarea scroll position to keep cursor visible
+        let visible_height: usize = 10; // approximate typical editing area height
+        if row >= (app.textarea_scroll as usize).saturating_add(visible_height) {
+            app.textarea_scroll = row.saturating_sub(visible_height.saturating_sub(1)) as u16;
+        } else if row < app.textarea_scroll as usize {
+            app.textarea_scroll = row as u16;
+        }
+        
         return Ok(false);
     }
 
@@ -2800,11 +2811,19 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             if !app.is_editing() && matches!(app.view_mode, ViewMode::Notes) {
                 app.content_scroll = app.content_scroll.saturating_sub(3);
             }
+            // Scroll up in textarea when editing
+            if app.is_editing() {
+                app.textarea_scroll = app.textarea_scroll.saturating_sub(3);
+            }
         }
         MouseEventKind::ScrollDown => {
             // Scroll down in content when not editing
             if !app.is_editing() && matches!(app.view_mode, ViewMode::Notes) {
                 app.content_scroll = app.content_scroll.saturating_add(3);
+            }
+            // Scroll down in textarea when editing
+            if app.is_editing() {
+                app.textarea_scroll = app.textarea_scroll.saturating_add(3);
             }
         }
         _ => {}
@@ -4334,12 +4353,42 @@ fn render_formatted_content(frame: &mut ratatui::Frame, app: &mut App, area: Rec
         .title(title)
         .borders(Borders::ALL);
 
+    // Calculate scrollbar state
+    let total_lines = lines.len();
+    let visible_height = area.height.saturating_sub(2) as usize; // account for borders
+    let _max_scroll = total_lines.saturating_sub(visible_height);
+    let mut scrollbar_state = ScrollbarState::new(total_lines).position(app.content_scroll as usize);
+
+    // Reserve space for scrollbar on the right
+    let content_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width.saturating_sub(1),
+        height: area.height,
+    };
+
+    let scrollbar_area = Rect {
+        x: area.x + area.width.saturating_sub(1),
+        y: area.y + 1,
+        width: 1,
+        height: area.height.saturating_sub(2),
+    };
+
     let content_panel = Paragraph::new(lines)
         .block(content_block)
         .wrap(Wrap { trim: false })
         .scroll((app.content_scroll, 0));
 
-    frame.render_widget(content_panel, area);
+    frame.render_widget(content_panel, content_area);
+
+    // Render scrollbar
+    frame.render_stateful_widget(
+        Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .style(Style::default().fg(Color::Gray)),
+        scrollbar_area,
+        &mut scrollbar_state,
+    );
 }
 
 fn draw_find_replace_ui(frame: &mut ratatui::Frame, app: &App, area: Rect) {
@@ -4900,18 +4949,50 @@ fn textarea_lines_with_cursor(app: &App, height: u16) -> Vec<Line<'static>> {
 
 fn render_textarea_editor(
     frame: &mut ratatui::Frame,
-    app: &App,
+    app: &mut App,
     area: Rect,
     title: &str,
 ) {
-    let inner_height = area.height.saturating_sub(2); // account for borders
-    let lines_display = textarea_lines_with_cursor(app, inner_height);
+    let inner_height = area.height.saturating_sub(2) as usize; // account for borders
+    let lines_display = textarea_lines_with_cursor(app, inner_height as u16);
+    
+    // Calculate scrollbar state based on total lines
+    let total_lines = app.textarea.lines().len();
+    let _max_scroll = total_lines.saturating_sub(inner_height);
+    
+    let mut scrollbar_state = ScrollbarState::new(total_lines).position(app.textarea_scroll as usize);
+    
+    // Create panel with scrollbar space reserved on the right
+    let panel_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width.saturating_sub(1), // Reserve space for scrollbar
+        height: area.height,
+    };
+    
+    let scrollbar_area = Rect {
+        x: area.x + area.width.saturating_sub(1),
+        y: area.y + 1,
+        width: 1,
+        height: area.height.saturating_sub(2),
+    };
+    
     let panel = Paragraph::new(lines_display)
         .block(Block::default().title(title).borders(Borders::ALL))
         .wrap(Wrap { trim: false })
-        .style(Style::default().fg(Color::Yellow));
+        .style(Style::default().fg(Color::Yellow))
+        .scroll((app.textarea_scroll, 0));
 
-    frame.render_widget(panel, area);
+    frame.render_widget(panel, panel_area);
+    
+    // Render scrollbar
+    frame.render_stateful_widget(
+        Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .style(Style::default().fg(Color::Gray)),
+        scrollbar_area,
+        &mut scrollbar_state,
+    );
 }
 
 fn task_help_lines() -> Vec<Line<'static>> {

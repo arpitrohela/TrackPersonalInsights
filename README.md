@@ -12,6 +12,21 @@ Press ? for help in the application.
 
 ---
 
+## Editing Limits
+
+To ensure system stability and data integrity, the application enforces the following limits on editable content:
+
+| Feature | Limit | Notes |
+|---------|-------|-------|
+| **Page Title** | 200 characters | Automatically truncated if exceeded |
+| **Page Content** | 100,000 characters (~100 KB) | Main note content limit |
+| **Journal Entry** | 50,000 characters (~50 KB) | Daily journal entries |
+| **Total Data File** | 50 MB per year | Security limit; prevents file corruption |
+
+Content exceeding these limits is automatically truncated without error messages. Plan your notes accordingly for optimal performance.
+
+---
+
 ## Keyboard Shortcuts
 
 ### Global
@@ -120,6 +135,7 @@ Press ? for help in the application.
 *   `Down Arrow`: Scroll down
 *   `PageUp`: Scroll up 10 lines
 *   `PageDown`: Scroll down 10 lines
+*   `Mouse Wheel Up/Down`: Scroll preview content
 
 ### Editing (General, when in edit mode)
 
@@ -129,6 +145,7 @@ Press ? for help in the application.
 *   `Ctrl+Y`: Redo
 *   `Ctrl+K`: Delete current line
 *   `Delete` / `Backspace`: Clear all (if `Ctrl+A` is active)
+*   `Mouse Wheel Up/Down`: Scroll editing content
 *   All other standard text editing keys (e.g., character input, arrow keys, Enter, Tab, Home, End, PageUp, PageDown, Esc, F-keys) are handled by the text area.
 
 ---
