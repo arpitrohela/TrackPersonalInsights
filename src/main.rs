@@ -142,6 +142,8 @@ struct AppData {
     journal_view: JournalView,
     #[serde(default)]
     planner_view: PlannerView,
+    #[serde(default)]
+    kanban_view: KanbanView,
 }
 
 impl AppData {
@@ -170,6 +172,7 @@ impl AppData {
             view_mode: app.view_mode,
             journal_view: app.journal_view,
             planner_view: app.planner_view,
+            kanban_view: app.kanban_view,
         }
     }
 
@@ -199,6 +202,7 @@ impl AppData {
         app.view_mode = self.view_mode;
         app.journal_view = self.journal_view;
         app.planner_view = self.planner_view;
+        app.kanban_view = self.kanban_view;
         app
     }
 }
@@ -451,6 +455,10 @@ struct KanbanCard {
     title: String,
     note: String,
     stage: KanbanStage,
+    #[serde(default = "default_kanban_matrix")]
+    matrix: TaskMatrix,
+    #[serde(default)]
+    due_date: Option<NaiveDate>,
     created_at: NaiveDate,
 }
 
@@ -460,9 +468,15 @@ impl KanbanCard {
             title,
             note,
             stage: KanbanStage::Todo,
+            matrix: TaskMatrix::Schedule,
+            due_date: None,
             created_at: Local::now().date_naive(),
         }
     }
+}
+
+fn default_kanban_matrix() -> TaskMatrix {
+    TaskMatrix::Schedule
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -767,6 +781,18 @@ impl Default for PlannerView {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum KanbanView {
+    Board,
+    Matrix,
+}
+
+impl Default for KanbanView {
+    fn default() -> Self {
+        KanbanView::Board
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum JournalView {
     Entry,
     MistakeList,
@@ -914,6 +940,7 @@ struct App {
     // View mode
     view_mode: ViewMode,
     planner_view: PlannerView,
+    kanban_view: KanbanView,
 
     // Planner & Journal
     tasks: Vec<Task>,
@@ -951,6 +978,7 @@ struct App {
     finance_items: Vec<(usize, Rect)>,
     calorie_items: Vec<(usize, Rect)>,
     kanban_items: Vec<(usize, Rect)>,
+    kanban_matrix_items: Vec<(usize, Rect)>,
     card_items: Vec<(usize, Rect)>,
     content_edit_area: Rect,
     add_notebook_btn: Rect,
@@ -995,6 +1023,12 @@ struct App {
     move_left_kanban_btn: Rect,
     move_right_kanban_btn: Rect,
     delete_kanban_btn: Rect,
+    kanban_board_btn: Rect,
+    kanban_matrix_btn: Rect,
+    kanban_matrix_do_btn: Rect,
+    kanban_matrix_schedule_btn: Rect,
+    kanban_matrix_delegate_btn: Rect,
+    kanban_matrix_eliminate_btn: Rect,
     add_card_btn: Rect,
     review_card_btn: Rect,
     edit_card_btn: Rect,
@@ -1214,18 +1248,24 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
                 title: "Sketch backlog".to_string(),
                 note: "Status: Planned\nOwner: (assign)\nRoadblocks: None yet\nNext step: Draft 5-7 candidate tasks\nLinks/Refs: --".to_string(),
                 stage: KanbanStage::Todo,
+                matrix: TaskMatrix::Schedule,
+                due_date: None,
                 created_at: Local::now().date_naive(),
             },
             KanbanCard {
                 title: "Prioritize top 3".to_string(),
                 note: "Status: In Progress\nOwner: (assign)\nRoadblocks: Waiting on estimates?\nNext step: Rank top 3, mark owners\nLinks/Refs: --".to_string(),
                 stage: KanbanStage::Doing,
+                matrix: TaskMatrix::Do,
+                due_date: None,
                 created_at: Local::now().date_naive(),
             },
             KanbanCard {
                 title: "Wrap a win".to_string(),
                 note: "Status: Done (template)\nOwner: (assign)\nRoadblocks: None\nNext step: Demo & announce\nLinks/Refs: --".to_string(),
                 stage: KanbanStage::Done,
+                matrix: TaskMatrix::Delegate,
+                due_date: None,
                 created_at: Local::now().date_naive(),
             },
         ];
@@ -1240,6 +1280,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             edit_target: EditTarget::None,
             view_mode: ViewMode::Notes,
             planner_view: PlannerView::List,
+            kanban_view: KanbanView::Board,
             tasks: Vec::new(),
             current_task_idx: 0,
             journal_entries: Vec::new(),
@@ -1268,6 +1309,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             finance_items: Vec::new(),
             calorie_items: Vec::new(),
             kanban_items: Vec::new(),
+            kanban_matrix_items: Vec::new(),
             card_items: Vec::new(),
             content_edit_area: Rect::default(),
             add_notebook_btn: Rect::default(),
@@ -1311,6 +1353,12 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             move_left_kanban_btn: Rect::default(),
             move_right_kanban_btn: Rect::default(),
             delete_kanban_btn: Rect::default(),
+            kanban_board_btn: Rect::default(),
+            kanban_matrix_btn: Rect::default(),
+            kanban_matrix_do_btn: Rect::default(),
+            kanban_matrix_schedule_btn: Rect::default(),
+            kanban_matrix_delegate_btn: Rect::default(),
+            kanban_matrix_eliminate_btn: Rect::default(),
             add_card_btn: Rect::default(),
             review_card_btn: Rect::default(),
             edit_card_btn: Rect::default(),
@@ -2641,6 +2689,49 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         }
     }
 
+    // Kanban view keyboard shortcuts (when not editing)
+    if !app.is_editing() && matches!(app.view_mode, ViewMode::Kanban) {
+        match key.code {
+            KeyCode::Char('b') | KeyCode::Char('B') => {
+                app.kanban_view = KanbanView::Board;
+                return Ok(false);
+            }
+            KeyCode::Char('m') | KeyCode::Char('M') => {
+                app.kanban_view = KanbanView::Matrix;
+                return Ok(false);
+            }
+            KeyCode::Char('1') if matches!(app.kanban_view, KanbanView::Matrix) => {
+                if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
+                    card.matrix = TaskMatrix::Do;
+                    let _ = save_app_data(app);
+                }
+                return Ok(false);
+            }
+            KeyCode::Char('2') if matches!(app.kanban_view, KanbanView::Matrix) => {
+                if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
+                    card.matrix = TaskMatrix::Schedule;
+                    let _ = save_app_data(app);
+                }
+                return Ok(false);
+            }
+            KeyCode::Char('3') if matches!(app.kanban_view, KanbanView::Matrix) => {
+                if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
+                    card.matrix = TaskMatrix::Delegate;
+                    let _ = save_app_data(app);
+                }
+                return Ok(false);
+            }
+            KeyCode::Char('4') if matches!(app.kanban_view, KanbanView::Matrix) => {
+                if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
+                    card.matrix = TaskMatrix::Eliminate;
+                    let _ = save_app_data(app);
+                }
+                return Ok(false);
+            }
+            _ => {}
+        }
+    }
+
     // Journal view keyboard shortcuts (when not editing)
     if !app.is_editing() && matches!(app.view_mode, ViewMode::Journal) {
         match key.code {
@@ -3046,6 +3137,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                     }
                     if matches!(mode, ViewMode::Planner) {
                         app.planner_view = PlannerView::List;
+                    }
+                    if matches!(mode, ViewMode::Kanban) {
+                        app.kanban_view = KanbanView::Board;
                     }
                     app.edit_target = EditTarget::None;
                     app.validate_indices();
@@ -3584,55 +3678,108 @@ fn handle_calories_mouse_left(app: &mut App, mouse: MouseEvent) {
 fn handle_kanban_mouse_left(app: &mut App, mouse: MouseEvent) {
     // Handle textarea mouse clicks for editing
     handle_textarea_mouse_click(app, mouse);
-    
-    if inside_rect(mouse, app.add_kanban_btn) {
-        let template = new_kanban_editor_template();
-        start_editing(app, EditTarget::KanbanNew, template);
-        // Position cursor at end of title line
-        app.textarea.move_cursor(CursorMove::Head);
-        app.textarea.move_cursor(CursorMove::End);
+
+    if inside_rect(mouse, app.kanban_board_btn) {
+        app.kanban_view = KanbanView::Board;
+        return;
+    }
+    if inside_rect(mouse, app.kanban_matrix_btn) {
+        app.kanban_view = KanbanView::Matrix;
         return;
     }
 
-    if inside_rect(mouse, app.move_left_kanban_btn) {
-        if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
-            card.stage = card.stage.move_left();
-            let _ = save_app_data(app);
-        }
-        return;
-    }
-
-    if inside_rect(mouse, app.move_right_kanban_btn) {
-        if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
-            card.stage = card.stage.move_right();
-            let _ = save_app_data(app);
-        }
-        return;
-    }
-
-    if inside_rect(mouse, app.delete_kanban_btn) {
-        delete_and_adjust_index(&mut app.kanban_cards, &mut app.current_kanban_card_idx);
-        let _ = save_app_data(app);
-        return;
-    }
-
-    for (idx, rect) in app.kanban_items.clone() {
-        if inside_rect(mouse, rect) {
+    if matches!(app.kanban_view, KanbanView::Matrix) {
+        if let Some(idx) = find_clicked_item(mouse, &app.kanban_matrix_items.clone()) {
             app.current_kanban_card_idx = idx;
-            if let Some(card) = app.kanban_cards.get(idx) {
-                let content = format_kanban_editor_content(card);
-                start_editing(app, EditTarget::KanbanEdit, content);
-                // Position cursor at end of title line
-                app.textarea.move_cursor(CursorMove::Head);
-                app.textarea.move_cursor(CursorMove::End);
+            return;
+        }
+        if inside_rect(mouse, app.kanban_matrix_do_btn) {
+            if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
+                card.matrix = TaskMatrix::Do;
+                let _ = save_app_data(app);
             }
             return;
+        }
+        if inside_rect(mouse, app.kanban_matrix_schedule_btn) {
+            if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
+                card.matrix = TaskMatrix::Schedule;
+                let _ = save_app_data(app);
+            }
+            return;
+        }
+        if inside_rect(mouse, app.kanban_matrix_delegate_btn) {
+            if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
+                card.matrix = TaskMatrix::Delegate;
+                let _ = save_app_data(app);
+            }
+            return;
+        }
+        if inside_rect(mouse, app.kanban_matrix_eliminate_btn) {
+            if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
+                card.matrix = TaskMatrix::Eliminate;
+                let _ = save_app_data(app);
+            }
+            return;
+        }
+    }
+    
+    if matches!(app.kanban_view, KanbanView::Board) {
+        if inside_rect(mouse, app.add_kanban_btn) {
+            let template = new_kanban_editor_template();
+            start_editing(app, EditTarget::KanbanNew, template);
+            // Position cursor at end of title line
+            app.textarea.move_cursor(CursorMove::Head);
+            app.textarea.move_cursor(CursorMove::End);
+            return;
+        }
+
+        if inside_rect(mouse, app.move_left_kanban_btn) {
+            if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
+                card.stage = card.stage.move_left();
+                let _ = save_app_data(app);
+            }
+            return;
+        }
+
+        if inside_rect(mouse, app.move_right_kanban_btn) {
+            if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
+                card.stage = card.stage.move_right();
+                let _ = save_app_data(app);
+            }
+            return;
+        }
+
+        if inside_rect(mouse, app.delete_kanban_btn) {
+            delete_and_adjust_index(&mut app.kanban_cards, &mut app.current_kanban_card_idx);
+            let _ = save_app_data(app);
+            return;
+        }
+    }
+
+    if matches!(app.kanban_view, KanbanView::Board) {
+        for (idx, rect) in app.kanban_items.clone() {
+            if inside_rect(mouse, rect) {
+                app.current_kanban_card_idx = idx;
+                if let Some(card) = app.kanban_cards.get(idx) {
+                    let content = format_kanban_editor_content(card);
+                    start_editing(app, EditTarget::KanbanEdit, content);
+                    // Position cursor at end of title line
+                    app.textarea.move_cursor(CursorMove::Head);
+                    app.textarea.move_cursor(CursorMove::End);
+                }
+                return;
+            }
         }
     }
 }
 
 fn handle_kanban_mouse_right(app: &mut App, mouse: MouseEvent) {
-    for (idx, rect) in app.kanban_items.clone() {
+    let items = if matches!(app.kanban_view, KanbanView::Matrix) {
+        app.kanban_matrix_items.clone()
+    } else {
+        app.kanban_items.clone()
+    };
+    for (idx, rect) in items {
         if inside_rect(mouse, rect) {
             app.current_kanban_card_idx = idx;
             delete_and_adjust_index(&mut app.kanban_cards, &mut app.current_kanban_card_idx);
@@ -6408,11 +6555,22 @@ fn parse_calorie_editor_content(
 }
 
 fn new_kanban_editor_template() -> String {
-    "Title: \nNote:\n".to_string()
+    "Title: \nMatrix: Schedule (options: Do|Schedule|Delegate|Eliminate)\nDue: Not set\nNote:\n"
+        .to_string()
 }
 
 fn format_kanban_editor_content(card: &KanbanCard) -> String {
-    format!("Title: {}\nNote:\n{}", card.title, card.note)
+    let due = card
+        .due_date
+        .map(|d| d.to_string())
+        .unwrap_or_else(|| "Not set".to_string());
+    format!(
+        "Title: {}\nMatrix: {}\nDue: {}\nNote:\n{}",
+        card.title,
+        task_matrix_label(card.matrix),
+        due,
+        card.note
+    )
 }
 
 fn parse_kanban_editor_content(input: &str, existing: Option<&KanbanCard>) -> Option<KanbanCard> {
@@ -6422,6 +6580,8 @@ fn parse_kanban_editor_content(input: &str, existing: Option<&KanbanCard>) -> Op
     card.note.clear();
 
     let mut title: Option<String> = None;
+    let mut matrix: Option<TaskMatrix> = None;
+    let mut due: Option<NaiveDate> = None;
     let mut in_note = false;
     let mut note_lines: Vec<String> = Vec::new();
 
@@ -6442,6 +6602,33 @@ fn parse_kanban_editor_content(input: &str, existing: Option<&KanbanCard>) -> Op
                 // Validate title length (max 200 characters)
                 if value.len() <= 200 {
                     title = Some(value.to_string());
+                } else {
+                    return None;
+                }
+            }
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("Matrix:")
+            .or_else(|| trimmed.strip_prefix("Eisenhower:"))
+            .or_else(|| trimmed.strip_prefix("Quadrant:"))
+        {
+            let value = rest.trim();
+            if !value.is_empty() {
+                matrix = parse_task_matrix(value);
+            }
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("Due:") {
+            let value = rest.trim();
+            if value.eq_ignore_ascii_case("not set") || value.is_empty() {
+                due = None;
+            } else if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+                let max_date = Local::now().date_naive() + chrono::Duration::days(3650);
+                let min_date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                if date >= min_date && date <= max_date {
+                    due = Some(date);
                 } else {
                     return None;
                 }
@@ -6470,6 +6657,18 @@ fn parse_kanban_editor_content(input: &str, existing: Option<&KanbanCard>) -> Op
         card.title = t;
     } else if existing.is_none() {
         return None;
+    }
+
+    if let Some(m) = matrix {
+        card.matrix = m;
+    } else if existing.is_none() {
+        card.matrix = TaskMatrix::Schedule;
+    }
+
+    if existing.is_none() {
+        card.due_date = due;
+    } else if due.is_some() {
+        card.due_date = due;
     }
 
     Some(card)
@@ -7757,35 +7956,210 @@ fn draw_kanban_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let editing = app.is_editing()
         && matches!(app.edit_target, EditTarget::KanbanNew | EditTarget::KanbanEdit);
 
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(5)])
+        .split(area);
+
+    draw_kanban_header(frame, app, outer[0]);
+
     let layout: Rc<[Rect]> = if editing {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-            .split(area)
+            .split(outer[1])
     } else {
-        Rc::from([area])
+        Rc::from([outer[1]])
     };
 
     let main_area = layout[0];
-    let main_split = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(3)])
-        .split(main_area);
+    match app.kanban_view {
+        KanbanView::Board => {
+            let main_split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(5), Constraint::Length(3)])
+                .split(main_area);
 
-    draw_kanban_board(frame, app, main_split[0]);
-    draw_kanban_controls(frame, app, main_split[1]);
+            draw_kanban_board(frame, app, main_split[0]);
+            draw_kanban_controls(frame, app, main_split[1]);
+        }
+        KanbanView::Matrix => {
+            draw_kanban_matrix_view(frame, app, main_area);
+        }
+    }
 
     if editing {
         let side = layout[1];
         let title = if matches!(app.edit_target, EditTarget::KanbanNew) {
-            "New Card - Fill Title/Note (Ctrl+S to save, Esc to cancel)"
+            "New Card - Fill Title/Matrix/Due/Note (Ctrl+S to save, Esc to cancel)"
         } else {
-            "Edit Card - Update Title/Note (Ctrl+S to save, Esc to cancel)"
+            "Edit Card - Update Title/Matrix/Due/Note (Ctrl+S to save, Esc to cancel)"
         };
 
         app.content_edit_area = side;
         render_textarea_editor(frame, app, side, title);
     }
+}
+
+fn draw_kanban_header(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let board_style = if matches!(app.kanban_view, KanbanView::Board) {
+        Style::default()
+            .bg(Color::Blue)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+
+    let matrix_style = if matches!(app.kanban_view, KanbanView::Matrix) {
+        Style::default()
+            .bg(Color::Blue)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+
+    let board_btn = Paragraph::new("Board")
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .style(board_style);
+    app.kanban_board_btn = chunks[0];
+    frame.render_widget(board_btn, chunks[0]);
+
+    let matrix_btn = Paragraph::new("Eisenhower Matrix")
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .style(matrix_style);
+    app.kanban_matrix_btn = chunks[1];
+    frame.render_widget(matrix_btn, chunks[1]);
+}
+
+fn draw_kanban_matrix_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(7), Constraint::Min(5), Constraint::Length(3)])
+        .split(area);
+
+    draw_kanban_schedule_focus(frame, app, chunks[0]);
+    draw_kanban_matrix_grid(frame, app, chunks[1]);
+    draw_kanban_matrix_assign_buttons(frame, app, chunks[2]);
+}
+
+fn draw_kanban_schedule_focus(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let mut items = Vec::new();
+    app.kanban_matrix_items.clear();
+
+    let today = Local::now().date_naive();
+    let focus_items = app
+        .kanban_cards
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| matches!(c.matrix, TaskMatrix::Schedule))
+        .map(|(idx, card)| {
+            let due = card
+                .due_date
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "No date".to_string());
+            let today_flag = if card.due_date == Some(today) { " • Today" } else { "" };
+            let text = format!("{}{}", card.title, format!(" ({}){}", due, today_flag));
+            (idx, text, false)
+        })
+        .collect::<Vec<_>>();
+
+    items.extend(build_list_items(
+        focus_items,
+        app.current_kanban_card_idx,
+        area,
+        &mut app.kanban_matrix_items,
+    ));
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title("Schedule Focus (Today + Planned)")
+                .borders(Borders::ALL),
+        )
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(list, area);
+}
+
+fn draw_kanban_matrix_grid(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[0]);
+
+    let bottom = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[1]);
+
+    draw_kanban_matrix_quadrant(frame, app, top[0], TaskMatrix::Do, "Do (Urgent + Important)");
+    draw_kanban_matrix_quadrant(frame, app, top[1], TaskMatrix::Schedule, "Schedule (Important + Not Urgent)");
+    draw_kanban_matrix_quadrant(frame, app, bottom[0], TaskMatrix::Delegate, "Delegate (Urgent + Not Important)");
+    draw_kanban_matrix_quadrant(frame, app, bottom[1], TaskMatrix::Eliminate, "Eliminate (Not Urgent + Not Important)");
+}
+
+fn draw_kanban_matrix_quadrant(
+    frame: &mut ratatui::Frame,
+    app: &mut App,
+    area: Rect,
+    matrix: TaskMatrix,
+    title: &str,
+) {
+    let items_iter = app
+        .kanban_cards
+        .iter()
+        .enumerate()
+        .filter(|(_, card)| card.matrix == matrix)
+        .map(|(idx, card)| {
+            let title_first_line = card.title.lines().next().unwrap_or(&card.title);
+            let due_str = card
+                .due_date
+                .map(|d| format!(" ({})", d))
+                .unwrap_or_default();
+            let text = format!("{}{}", title_first_line, due_str);
+            (idx, text, false)
+        })
+        .collect::<Vec<_>>();
+
+    let items = build_list_items(
+        items_iter,
+        app.current_kanban_card_idx,
+        area,
+        &mut app.kanban_matrix_items,
+    );
+    let list = List::new(items)
+        .block(Block::default().title(title).borders(Borders::ALL))
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(list, area);
+}
+
+fn draw_kanban_matrix_assign_buttons(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let chunks = split_equal_horizontal(area, 4);
+
+    app.kanban_matrix_do_btn = chunks[0];
+    render_button(frame, "Assign Do", chunks[0], Color::Red);
+
+    app.kanban_matrix_schedule_btn = chunks[1];
+    render_button(frame, "Assign Schedule", chunks[1], Color::Yellow);
+
+    app.kanban_matrix_delegate_btn = chunks[2];
+    render_button(frame, "Assign Delegate", chunks[2], Color::Cyan);
+
+    app.kanban_matrix_eliminate_btn = chunks[3];
+    render_button(frame, "Assign Eliminate", chunks[3], Color::Gray);
 }
 
 fn draw_kanban_board(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
@@ -7865,7 +8239,7 @@ fn draw_kanban_controls(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
         ])
         .split(area);
 
-    let new_btn = Paragraph::new("New Flashcard")
+    let new_btn = Paragraph::new("New Card")
         .block(Block::default().borders(Borders::ALL))
         .alignment(Alignment::Center)
         .style(Style::default().fg(Color::Green));
