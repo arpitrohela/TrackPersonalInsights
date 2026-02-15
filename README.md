@@ -21,6 +21,7 @@ To ensure system stability and data integrity, the application enforces the foll
 | **Page Title** | 200 characters | Automatically truncated if exceeded |
 | **Page Content** | 100,000 characters (~100 KB) | Main note content limit |
 | **Journal Entry** | 50,000 characters (~50 KB) | Daily journal entries |
+| **Mistake Entry** | 50,000 characters (~50 KB) | Daily mistake book entries |
 | **Total Data File** | 50 MB per year | Security limit; prevents file corruption |
 
 Content exceeding these limits is automatically truncated without error messages. Plan your notes accordingly for optimal performance.
@@ -128,6 +129,19 @@ Content exceeding these limits is automatically truncated without error messages
 *   `Down Arrow`: Scroll down
 *   `PageUp`: Scroll up 10 lines
 *   `PageDown`: Scroll down 10 lines
+
+### Journal View (when not editing)
+
+*   `J`: Journal entry view
+*   `M`: Mistake Book list
+*   `L`: Mistake Book list
+*   `G`: Mistake Book log
+*   `Up Arrow`: Previous mistake date (in Mistake Book list)
+*   `Down Arrow`: Next mistake date (in Mistake Book list)
+*   `Enter`: Open selected mistake date (in Mistake Book list)
+*   `Left Arrow`: Previous day (in Mistake Book log)
+*   `Right Arrow`: Next day (in Mistake Book log)
+*   `T`: Jump to today (in Mistake Book log)
 
 ### Notes View (scrolling when not editing and not in search)
 

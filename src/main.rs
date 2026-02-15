@@ -118,6 +118,8 @@ struct AppData {
     notebooks: Vec<Notebook>,
     tasks: Vec<Task>,
     journal_entries: Vec<JournalEntry>,
+    #[serde(default)]
+    mistake_entries: Vec<MistakeEntry>,
     habits: Vec<Habit>,
     finances: Vec<FinanceEntry>,
     calories: Vec<CalorieEntry>,
@@ -133,7 +135,11 @@ struct AppData {
     current_kanban_card_idx: usize,
     current_card_idx: usize,
     current_journal_date: NaiveDate,
+    #[serde(default = "default_current_mistake_date")]
+    current_mistake_date: NaiveDate,
     view_mode: ViewMode,
+    #[serde(default)]
+    journal_view: JournalView,
 }
 
 impl AppData {
@@ -142,6 +148,7 @@ impl AppData {
             notebooks: app.notebooks.clone(),
             tasks: app.tasks.clone(),
             journal_entries: app.journal_entries.clone(),
+            mistake_entries: app.mistake_entries.clone(),
             habits: app.habits.clone(),
             finances: app.finances.clone(),
             calories: app.calories.clone(),
@@ -157,7 +164,9 @@ impl AppData {
             current_kanban_card_idx: app.current_kanban_card_idx,
             current_card_idx: app.current_card_idx,
             current_journal_date: app.current_journal_date,
+            current_mistake_date: app.current_mistake_date,
             view_mode: app.view_mode,
+            journal_view: app.journal_view,
         }
     }
 
@@ -183,9 +192,15 @@ impl AppData {
         app.current_kanban_card_idx = self.current_kanban_card_idx;
         app.current_card_idx = self.current_card_idx;
         app.current_journal_date = self.current_journal_date;
+        app.current_mistake_date = self.current_mistake_date;
         app.view_mode = self.view_mode;
+        app.journal_view = self.journal_view;
         app
     }
+}
+
+fn default_current_mistake_date() -> NaiveDate {
+    Local::now().date_naive()
 }
 
 // ============================================================================
@@ -668,6 +683,21 @@ impl JournalEntry {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct MistakeEntry {
+    date: NaiveDate,
+    content: String,
+}
+
+impl MistakeEntry {
+    fn new(date: NaiveDate) -> Self {
+        Self {
+            date,
+            content: String::new(),
+        }
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum HierarchyLevel {
     Notebook,
@@ -690,6 +720,7 @@ enum EditTarget {
     PageTitle,
     PageContent,
     JournalEntry,
+    MistakeEntry,
     TaskTitle,
     TaskDetails,
     HabitNew,
@@ -718,11 +749,31 @@ enum ViewMode {
     Flashcards,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum JournalView {
+    Entry,
+    MistakeList,
+    MistakeLog,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CalendarTarget {
+    Journal,
+    MistakeBook,
+}
+
+impl Default for JournalView {
+    fn default() -> Self {
+        JournalView::Entry
+    }
+}
+
 #[derive(Clone, Copy)]
 enum SearchTarget {
     Note { notebook_idx: usize, section_idx: usize, page_idx: usize },
     Task { idx: usize },
     Journal { date: NaiveDate },
+    MistakeBook { date: NaiveDate },
     Habit { idx: usize, date: Option<NaiveDate> },
     Finance { idx: usize, date: NaiveDate },
     Calorie { idx: usize, date: NaiveDate },
@@ -851,6 +902,9 @@ struct App {
     current_task_idx: usize,
     journal_entries: Vec<JournalEntry>,
     current_journal_date: NaiveDate,
+    mistake_entries: Vec<MistakeEntry>,
+    current_mistake_date: NaiveDate,
+    journal_view: JournalView,
     // Habits
     habits: Vec<Habit>,
     current_habit_idx: usize,
@@ -930,8 +984,13 @@ struct App {
     next_day_btn: Rect,
     date_btn: Rect,
     today_btn: Rect,
+    mistake_book_btn: Rect,
+    mistake_list_btn: Rect,
+    mistake_log_btn: Rect,
     search_btn: Rect,
     search_result_items: Vec<(usize, Rect)>,
+    mistake_list_items: Vec<(usize, Rect)>,
+    mistake_list_dates: Vec<NaiveDate>,
 
     // Content scrolling (Notes view)
     content_scroll: u16,
@@ -949,6 +1008,7 @@ struct App {
     calendar_year: i32,
     calendar_month: u32,
     calendar_day_rects: Vec<(u32, Rect)>, // (day, clickable rect)
+    calendar_target: CalendarTarget,
 
     // Inline editing (click line to edit)
     editing_line_index: usize, // Which line is being edited
@@ -1158,6 +1218,9 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             current_task_idx: 0,
             journal_entries: Vec::new(),
             current_journal_date: Local::now().date_naive(),
+            mistake_entries: Vec::new(),
+            current_mistake_date: Local::now().date_naive(),
+            journal_view: JournalView::Entry,
             habits: Vec::new(),
             current_habit_idx: 0,
             finances: Vec::new(),
@@ -1229,8 +1292,13 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             next_day_btn: Rect::default(),
             date_btn: Rect::default(),
             today_btn: Rect::default(),
+            mistake_book_btn: Rect::default(),
+            mistake_list_btn: Rect::default(),
+            mistake_log_btn: Rect::default(),
             search_btn: Rect::default(),
             search_result_items: Vec::new(),
+            mistake_list_items: Vec::new(),
+            mistake_list_dates: Vec::new(),
             content_scroll: 0,
             textarea_scroll: 0,
             selection_all: false,
@@ -1260,6 +1328,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             calendar_year: Local::now().year(),
             calendar_month: Local::now().month(),
             calendar_day_rects: Vec::new(),
+            calendar_target: CalendarTarget::Journal,
             spell_dict: Self::load_spell_dict(),
             show_spell_check: false,
             spell_check_results: Vec::new(),
@@ -1526,6 +1595,26 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
                     let mut entry = JournalEntry::new(self.current_journal_date);
                     entry.content = validated_content;
                     self.journal_entries.push(entry);
+                }
+            }
+            EditTarget::MistakeEntry => {
+                // Validate mistake entry content length (max 50,000 characters)
+                let validated_content = if input.len() <= 50_000 {
+                    input.clone()
+                } else {
+                    input.chars().take(50_000).collect()
+                };
+
+                if let Some(entry) = self
+                    .mistake_entries
+                    .iter_mut()
+                    .find(|e| e.date == self.current_mistake_date)
+                {
+                    entry.content = validated_content;
+                } else {
+                    let mut entry = MistakeEntry::new(self.current_mistake_date);
+                    entry.content = validated_content;
+                    self.mistake_entries.push(entry);
                 }
             }
             EditTarget::HabitNew => {
@@ -1808,6 +1897,12 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             SearchTarget::Journal { date } => {
                 self.current_journal_date = date;
                 self.view_mode = ViewMode::Journal;
+                self.journal_view = JournalView::Entry;
+            }
+            SearchTarget::MistakeBook { date } => {
+                self.current_mistake_date = date;
+                self.view_mode = ViewMode::Journal;
+                self.journal_view = JournalView::MistakeLog;
             }
             SearchTarget::Habit { idx, date } => {
                 self.current_habit_idx = idx.min(self.habits.len().saturating_sub(1));
@@ -1900,6 +1995,21 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
                     title: format!("Journal {}", entry.date),
                     detail: first_line.to_string(),
                     target: SearchTarget::Journal { date: entry.date },
+                    score,
+                });
+            }
+        }
+
+        // Mistake book entries
+        for entry in self.mistake_entries.iter() {
+            let first_line = entry.content.lines().next().unwrap_or("");
+            let score = self.fuzzy_score(&entry.date.to_string(), q)
+                + self.fuzzy_score(&entry.content, q);
+            if score > 300 {
+                hits.push(SearchHit {
+                    title: format!("Mistake Book {}", entry.date),
+                    detail: first_line.to_string(),
+                    target: SearchTarget::MistakeBook { date: entry.date },
                     score,
                 });
             }
@@ -2062,7 +2172,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 // Allow typing day number (1-31)
                 let digit = c.to_digit(10).unwrap() as u32;
                 if let Some(date) = NaiveDate::from_ymd_opt(app.calendar_year, app.calendar_month, digit) {
-                    app.current_journal_date = date;
+                    match app.calendar_target {
+                        CalendarTarget::Journal => app.current_journal_date = date,
+                        CalendarTarget::MistakeBook => app.current_mistake_date = date,
+                    }
                     app.show_calendar = false;
                 }
             }
@@ -2452,6 +2565,89 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         }
     }
 
+    // Journal view keyboard shortcuts (when not editing)
+    if !app.is_editing() && matches!(app.view_mode, ViewMode::Journal) {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Char('J') => {
+                app.journal_view = JournalView::Entry;
+                return Ok(false);
+            }
+            KeyCode::Char('m') | KeyCode::Char('M') => {
+                app.journal_view = JournalView::MistakeList;
+                app.current_mistake_date = app.current_journal_date;
+                return Ok(false);
+            }
+            KeyCode::Char('l') | KeyCode::Char('L') => {
+                app.journal_view = JournalView::MistakeList;
+                return Ok(false);
+            }
+            KeyCode::Char('g') | KeyCode::Char('G') => {
+                app.journal_view = JournalView::MistakeLog;
+                if app.mistake_entries.is_empty() {
+                    app.current_mistake_date = app.current_journal_date;
+                }
+                return Ok(false);
+            }
+            KeyCode::Up if matches!(app.journal_view, JournalView::MistakeList) => {
+                let dates = mistake_list_dates(app);
+                if dates.is_empty() {
+                    return Ok(false);
+                }
+                let current_idx = dates
+                    .iter()
+                    .position(|d| *d == app.current_mistake_date)
+                    .unwrap_or(0);
+                let next_idx = if current_idx > 0 {
+                    current_idx - 1
+                } else {
+                    0
+                };
+                app.current_mistake_date = dates[next_idx];
+                return Ok(false);
+            }
+            KeyCode::Down if matches!(app.journal_view, JournalView::MistakeList) => {
+                let dates = mistake_list_dates(app);
+                if dates.is_empty() {
+                    return Ok(false);
+                }
+                let current_idx = dates
+                    .iter()
+                    .position(|d| *d == app.current_mistake_date)
+                    .unwrap_or(0);
+                let next_idx = (current_idx + 1).min(dates.len().saturating_sub(1));
+                app.current_mistake_date = dates[next_idx];
+                return Ok(false);
+            }
+            KeyCode::Enter if matches!(app.journal_view, JournalView::MistakeList) => {
+                if !app.mistake_entries.is_empty() {
+                    app.journal_view = JournalView::MistakeLog;
+                }
+                return Ok(false);
+            }
+            KeyCode::Left if matches!(app.journal_view, JournalView::MistakeLog) => {
+                app.current_mistake_date = app
+                    .current_mistake_date
+                    .pred_opt()
+                    .unwrap_or(app.current_mistake_date);
+                return Ok(false);
+            }
+            KeyCode::Right if matches!(app.journal_view, JournalView::MistakeLog) => {
+                app.current_mistake_date = app
+                    .current_mistake_date
+                    .succ_opt()
+                    .unwrap_or(app.current_mistake_date);
+                return Ok(false);
+            }
+            KeyCode::Char('t') | KeyCode::Char('T')
+                if matches!(app.journal_view, JournalView::MistakeLog) =>
+            {
+                app.current_mistake_date = Local::now().date_naive();
+                return Ok(false);
+            }
+            _ => {}
+        }
+    }
+
     // Notes view scrolling when not editing and not in search
     if !app.is_editing() && matches!(app.view_mode, ViewMode::Notes) {
         match key.code {
@@ -2739,7 +2935,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                         if let Some(date) =
                             NaiveDate::from_ymd_opt(app.calendar_year, app.calendar_month, day)
                         {
-                            app.current_journal_date = date;
+                            match app.calendar_target {
+                                CalendarTarget::Journal => app.current_journal_date = date,
+                                CalendarTarget::MistakeBook => app.current_mistake_date = date,
+                            }
                             app.show_calendar = false;
                         }
                         return;
@@ -2766,6 +2965,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             for (mode, rect) in app.view_mode_btns.clone() {
                 if inside_rect(mouse, rect) {
                     app.view_mode = mode;
+                    if matches!(mode, ViewMode::Journal) {
+                        app.journal_view = JournalView::Entry;
+                    }
                     app.edit_target = EditTarget::None;
                     app.validate_indices();
                     return;
@@ -3004,26 +3206,74 @@ fn handle_planner_mouse_middle(app: &mut App, mouse: MouseEvent) {
 fn handle_journal_mouse_left(app: &mut App, mouse: MouseEvent) {
     // Handle textarea mouse clicks for editing
     handle_textarea_mouse_click(app, mouse);
-    
-    // Check navigation buttons
-    if handle_date_nav(app, mouse) {
+
+    if matches!(app.journal_view, JournalView::Entry) {
+        if inside_rect(mouse, app.mistake_book_btn) {
+            app.journal_view = JournalView::MistakeList;
+            app.current_mistake_date = app.current_journal_date;
+            return;
+        }
+
+        // Check navigation buttons
+        if handle_date_nav(app, mouse) {
+            return;
+        }
+
+        // Check content area for editing
+        if inside_rect(mouse, app.content_edit_area) && !app.is_editing() {
+            let entry = app
+                .journal_entries
+                .iter()
+                .find(|e| e.date == app.current_journal_date)
+                .cloned();
+
+            let content = entry.map(|e| e.content).unwrap_or_default();
+            let is_empty = content.is_empty();
+            start_editing(app, EditTarget::JournalEntry, content);
+            // Position cursor at start for new entry or at end for existing
+            if is_empty {
+                app.textarea.move_cursor(CursorMove::Head);
+            }
+        }
         return;
     }
 
-    // Check content area for editing
-    if inside_rect(mouse, app.content_edit_area) && !app.is_editing() {
-        let entry = app
-            .journal_entries
-            .iter()
-            .find(|e| e.date == app.current_journal_date)
-            .cloned();
+    if inside_rect(mouse, app.mistake_list_btn) {
+        app.journal_view = JournalView::MistakeList;
+        return;
+    }
+    if inside_rect(mouse, app.mistake_log_btn) {
+        app.journal_view = JournalView::MistakeLog;
+        return;
+    }
 
-        let content = entry.map(|e| e.content).unwrap_or_default();
-        let is_empty = content.is_empty();
-        start_editing(app, EditTarget::JournalEntry, content);
-        // Position cursor at start for new entry or at end for existing
-        if is_empty {
-            app.textarea.move_cursor(CursorMove::Head);
+    if matches!(app.journal_view, JournalView::MistakeList) {
+        if let Some(idx) = find_clicked_item(mouse, &app.mistake_list_items.clone()) {
+            if let Some(date) = app.mistake_list_dates.get(idx).copied() {
+                app.current_mistake_date = date;
+                app.journal_view = JournalView::MistakeLog;
+            }
+        }
+        return;
+    }
+
+    if matches!(app.journal_view, JournalView::MistakeLog) {
+        if handle_mistake_date_nav(app, mouse) {
+            return;
+        }
+        if inside_rect(mouse, app.content_edit_area) && !app.is_editing() {
+            let entry = app
+                .mistake_entries
+                .iter()
+                .find(|e| e.date == app.current_mistake_date)
+                .cloned();
+
+            let content = entry.map(|e| e.content).unwrap_or_default();
+            let is_empty = content.is_empty();
+            start_editing(app, EditTarget::MistakeEntry, content);
+            if is_empty {
+                app.textarea.move_cursor(CursorMove::Head);
+            }
         }
     }
 }
@@ -3610,6 +3860,12 @@ fn split_equal_horizontal(area: Rect, count: usize) -> Vec<Rect> {
         .to_vec()
 }
 
+fn mistake_list_dates(app: &App) -> Vec<NaiveDate> {
+    let mut dates: Vec<NaiveDate> = app.mistake_entries.iter().map(|e| e.date).collect();
+    dates.sort_by(|a, b| b.cmp(a));
+    dates
+}
+
 // Helper: Handle date navigation button clicks
 fn handle_date_nav(app: &mut App, mouse: MouseEvent) -> bool {
     if inside_rect(mouse, app.prev_day_btn) {
@@ -3629,12 +3885,42 @@ fn handle_date_nav(app: &mut App, mouse: MouseEvent) -> bool {
     if inside_rect(mouse, app.date_btn) {
         // Open calendar picker
         app.show_calendar = true;
+        app.calendar_target = CalendarTarget::Journal;
         app.calendar_year = app.current_journal_date.year();
         app.calendar_month = app.current_journal_date.month();
         return true;
     }
     if inside_rect(mouse, app.today_btn) {
         app.current_journal_date = Local::now().date_naive();
+        return true;
+    }
+    false
+}
+
+fn handle_mistake_date_nav(app: &mut App, mouse: MouseEvent) -> bool {
+    if inside_rect(mouse, app.prev_day_btn) {
+        app.current_mistake_date = app
+            .current_mistake_date
+            .pred_opt()
+            .unwrap_or(app.current_mistake_date);
+        return true;
+    }
+    if inside_rect(mouse, app.next_day_btn) {
+        app.current_mistake_date = app
+            .current_mistake_date
+            .succ_opt()
+            .unwrap_or(app.current_mistake_date);
+        return true;
+    }
+    if inside_rect(mouse, app.date_btn) {
+        app.show_calendar = true;
+        app.calendar_target = CalendarTarget::MistakeBook;
+        app.calendar_year = app.current_mistake_date.year();
+        app.calendar_month = app.current_mistake_date.month();
+        return true;
+    }
+    if inside_rect(mouse, app.today_btn) {
+        app.current_mistake_date = Local::now().date_naive();
         return true;
     }
     false
@@ -4142,6 +4428,10 @@ fn render_editing_panel(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
             "Edit Journal Entry (Ctrl+S to save, Esc to cancel)",
             app.editing_input.clone(),
         ),
+        EditTarget::MistakeEntry => (
+            "Edit Mistake Entry (Ctrl+S to save, Esc to cancel)",
+            app.editing_input.clone(),
+        ),
         EditTarget::HabitNew => (
             "Edit New Habit - Fill Name/Frequency/Status fields (Ctrl+S to save, Esc to cancel)",
             app.editing_input.clone(),
@@ -4489,7 +4779,7 @@ fn draw_global_search_overlay(frame: &mut ratatui::Frame, app: &mut App) {
     app.search_result_items.clear();
 
     if app.global_search_results.is_empty() {
-        let hint = Paragraph::new("Type to search across notes, tasks, journal, habits, finance, calories, and kanban.")
+        let hint = Paragraph::new("Type to search across notes, tasks, journal, mistake book, habits, finance, calories, and kanban.")
             .block(Block::default().title("Results").borders(Borders::ALL))
             .style(Style::default().fg(Color::Gray));
         frame.render_widget(hint, list_area);
@@ -8187,11 +8477,262 @@ fn draw_journal_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Length(3), Constraint::Min(5)])
         .split(area);
 
-    // Date navigation
-    draw_date_navigation(frame, app, chunks[0]);
+    if matches!(app.journal_view, JournalView::Entry) {
+        draw_journal_navigation(frame, app, chunks[0]);
+        draw_journal_entry(frame, app, chunks[1]);
+    } else {
+        draw_mistake_book_header(frame, app, chunks[0]);
+        draw_mistake_book_view(frame, app, chunks[1]);
+    }
+}
 
-    // Journal entry
-    draw_journal_entry(frame, app, chunks[1]);
+fn draw_journal_navigation(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(18),
+            Constraint::Percentage(18),
+            Constraint::Percentage(18),
+            Constraint::Percentage(28),
+            Constraint::Percentage(18),
+        ])
+        .split(area);
+
+    let mistake_btn = Paragraph::new("Mistake Book")
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Magenta));
+    app.mistake_book_btn = chunks[0];
+    frame.render_widget(mistake_btn, chunks[0]);
+
+    let prev_btn = Paragraph::new("Previous Day")
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Cyan));
+    app.prev_day_btn = chunks[1];
+    frame.render_widget(prev_btn, chunks[1]);
+
+    let next_btn = Paragraph::new("Next Day")
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Cyan));
+    app.next_day_btn = chunks[2];
+    frame.render_widget(next_btn, chunks[2]);
+
+    let date_display = Paragraph::new(format!("Date {}", app.current_journal_date))
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+    app.date_btn = chunks[3];
+    frame.render_widget(date_display, chunks[3]);
+
+    let today_btn = Paragraph::new("Jump to Today")
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Green));
+    app.today_btn = chunks[4];
+    frame.render_widget(today_btn, chunks[4]);
+}
+
+fn draw_mistake_book_header(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let list_style = if matches!(app.journal_view, JournalView::MistakeList) {
+        Style::default()
+            .bg(Color::Blue)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+
+    let log_style = if matches!(app.journal_view, JournalView::MistakeLog) {
+        Style::default()
+            .bg(Color::Blue)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+
+    let list_btn = Paragraph::new("List")
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .style(list_style);
+    app.mistake_list_btn = chunks[0];
+    frame.render_widget(list_btn, chunks[0]);
+
+    let log_btn = Paragraph::new("Log")
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .style(log_style);
+    app.mistake_log_btn = chunks[1];
+    frame.render_widget(log_btn, chunks[1]);
+}
+
+fn draw_mistake_book_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    match app.journal_view {
+        JournalView::MistakeList => draw_mistake_book_list(frame, app, area),
+        JournalView::MistakeLog => draw_mistake_book_log(frame, app, area),
+        JournalView::Entry => draw_journal_entry(frame, app, area),
+    }
+}
+
+fn draw_mistake_book_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    app.mistake_list_items.clear();
+    app.mistake_list_dates.clear();
+
+    let dates = mistake_list_dates(app);
+    app.mistake_list_dates = dates.clone();
+
+    if dates.is_empty() {
+        let help_text = vec![
+            Line::from(""),
+            Line::from("Mistake Book - No entries yet"),
+            Line::from(""),
+            Line::from("How to use:"),
+            Line::from("  1. Click Log to write about today's mistake"),
+            Line::from("  2. Note the pitfall and how to improve"),
+            Line::from("  3. Return here to review past mistakes"),
+        ];
+
+        let panel = Paragraph::new(help_text)
+            .block(Block::default().title("Mistake Book").borders(Borders::ALL))
+            .style(Style::default().fg(Color::Gray));
+        frame.render_widget(panel, area);
+        return;
+    }
+
+    let current_idx = dates
+        .iter()
+        .position(|d| *d == app.current_mistake_date)
+        .unwrap_or(0);
+    let items_iter = dates
+        .iter()
+        .enumerate()
+        .map(|(idx, d)| (idx, d.to_string(), false))
+        .collect::<Vec<_>>();
+    let items = build_list_items(items_iter, current_idx, area, &mut app.mistake_list_items);
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title("Mistake Book - Logged Days")
+                .borders(Borders::ALL),
+        )
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(list, area);
+}
+
+fn draw_mistake_book_log(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(5)])
+        .split(area);
+
+    draw_mistake_date_navigation(frame, app, chunks[0]);
+
+    let entry = app
+        .mistake_entries
+        .iter()
+        .find(|e| e.date == app.current_mistake_date)
+        .cloned();
+
+    if app.is_editing() && matches!(app.edit_target, EditTarget::MistakeEntry) {
+        let title = format!(
+            "Mistake Book - {} (Ctrl+S to save, Esc to cancel)",
+            app.current_mistake_date
+        );
+        app.content_edit_area = chunks[1];
+        render_textarea_editor(frame, app, chunks[1], &title);
+    } else if entry.is_none() {
+        let help_text = vec![
+            Line::from(""),
+            Line::from("Mistake Book - Daily Reflection"),
+            Line::from(""),
+            Line::from("Log a mistake of the day:"),
+            Line::from("  - What happened?"),
+            Line::from("  - What can I improve?"),
+            Line::from("  - What should I practice to avoid it?"),
+            Line::from(""),
+            Line::from("Click here to start writing."),
+        ];
+
+        let panel = Paragraph::new(help_text)
+            .block(
+                Block::default()
+                    .title(format!("Mistake Book - {}", app.current_mistake_date))
+                    .borders(Borders::ALL),
+            )
+            .style(Style::default().fg(Color::Gray));
+        app.content_edit_area = chunks[1];
+        frame.render_widget(panel, chunks[1]);
+    } else {
+        let content = entry
+            .as_ref()
+            .map(|e| e.content.clone())
+            .unwrap_or_else(|| "(Click to write in your mistake book)".to_string());
+
+        let panel = Paragraph::new(content)
+            .block(
+                Block::default()
+                    .title(format!("Mistake Book - {}", app.current_mistake_date))
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false });
+        app.content_edit_area = chunks[1];
+        frame.render_widget(panel, chunks[1]);
+    }
+}
+
+fn draw_mistake_date_navigation(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(22),
+            Constraint::Percentage(22),
+            Constraint::Percentage(34),
+            Constraint::Percentage(22),
+        ])
+        .split(area);
+
+    let prev_btn = Paragraph::new("Previous Day")
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Cyan));
+    app.prev_day_btn = chunks[0];
+    frame.render_widget(prev_btn, chunks[0]);
+
+    let next_btn = Paragraph::new("Next Day")
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Cyan));
+    app.next_day_btn = chunks[1];
+    frame.render_widget(next_btn, chunks[1]);
+
+    let date_display = Paragraph::new(format!("Date {}", app.current_mistake_date))
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+    app.date_btn = chunks[2];
+    frame.render_widget(date_display, chunks[2]);
+
+    let today_btn = Paragraph::new("Jump to Today")
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Green));
+    app.today_btn = chunks[3];
+    frame.render_widget(today_btn, chunks[3]);
 }
 
 fn draw_date_navigation(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
