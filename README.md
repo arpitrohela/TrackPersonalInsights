@@ -12,6 +12,12 @@ Press ? for help in the application.
 
 ---
 
+## TODO
+
+- Add a Finance sub-tab (like Mistake Book under Journal) to import bank/wallet CSVs, render them in a table view, and support multiple sources as separate tabs. Provide an AI-powered merge flow to normalize different bank formats into a single unified view, so the Finance tab is usable without manual entry.
+
+---
+
 ## Editing Limits
 
 To ensure system stability and data integrity, the application enforces the following limits on editable content:
