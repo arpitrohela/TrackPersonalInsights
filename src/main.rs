@@ -140,6 +140,8 @@ struct AppData {
     view_mode: ViewMode,
     #[serde(default)]
     journal_view: JournalView,
+    #[serde(default)]
+    planner_view: PlannerView,
 }
 
 impl AppData {
@@ -167,6 +169,7 @@ impl AppData {
             current_mistake_date: app.current_mistake_date,
             view_mode: app.view_mode,
             journal_view: app.journal_view,
+            planner_view: app.planner_view,
         }
     }
 
@@ -195,6 +198,7 @@ impl AppData {
         app.current_mistake_date = self.current_mistake_date;
         app.view_mode = self.view_mode;
         app.journal_view = self.journal_view;
+        app.planner_view = self.planner_view;
         app
     }
 }
@@ -373,7 +377,7 @@ struct Task {
     title: String,
     description: String,
     completed: bool,
-    priority: TaskPriority,
+    matrix: TaskMatrix,
     due_date: Option<NaiveDate>,
     reminder_text: Option<String>,
     reminder_date: Option<NaiveDate>,
@@ -385,10 +389,11 @@ struct Task {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[allow(dead_code)]
-enum TaskPriority {
-    Low,
-    Medium,
-    High,
+enum TaskMatrix {
+    Delegate,
+    Schedule,
+    Do,
+    Eliminate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -655,7 +660,7 @@ impl Task {
             title,
             description,
             completed: false,
-            priority: TaskPriority::Medium,
+            matrix: TaskMatrix::Schedule,
             due_date: None,
             reminder_text: None,
             reminder_date: None,
@@ -747,6 +752,18 @@ enum ViewMode {
     Calories,
     Kanban,
     Flashcards,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+enum PlannerView {
+    List,
+    Matrix,
+}
+
+impl Default for PlannerView {
+    fn default() -> Self {
+        PlannerView::List
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -896,6 +913,7 @@ struct App {
 
     // View mode
     view_mode: ViewMode,
+    planner_view: PlannerView,
 
     // Planner & Journal
     tasks: Vec<Task>,
@@ -941,8 +959,15 @@ struct App {
     delete_btn: Rect,
     view_mode_btns: Vec<(ViewMode, Rect)>,
     add_task_btn: Rect,
+    planner_list_btn: Rect,
+    planner_matrix_btn: Rect,
     edit_task_btn: Rect,
     delete_task_btn: Rect,
+    matrix_items: Vec<(usize, Rect)>,
+    matrix_do_btn: Rect,
+    matrix_schedule_btn: Rect,
+    matrix_delegate_btn: Rect,
+    matrix_eliminate_btn: Rect,
     add_habit_btn: Rect,
     mark_done_btn: Rect,
     edit_habit_btn: Rect,
@@ -1214,6 +1239,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             editing_input: String::new(),
             edit_target: EditTarget::None,
             view_mode: ViewMode::Notes,
+            planner_view: PlannerView::List,
             tasks: Vec::new(),
             current_task_idx: 0,
             journal_entries: Vec::new(),
@@ -1250,8 +1276,15 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             delete_btn: Rect::default(),
             view_mode_btns: Vec::new(),
             add_task_btn: Rect::default(),
+            planner_list_btn: Rect::default(),
+            planner_matrix_btn: Rect::default(),
             edit_task_btn: Rect::default(),
             delete_task_btn: Rect::default(),
+            matrix_items: Vec::new(),
+            matrix_do_btn: Rect::default(),
+            matrix_schedule_btn: Rect::default(),
+            matrix_delegate_btn: Rect::default(),
+            matrix_eliminate_btn: Rect::default(),
             add_habit_btn: Rect::default(),
             mark_done_btn: Rect::default(),
             edit_habit_btn: Rect::default(),
@@ -2565,6 +2598,49 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         }
     }
 
+    // Planner view keyboard shortcuts (when not editing)
+    if !app.is_editing() && matches!(app.view_mode, ViewMode::Planner) {
+        match key.code {
+            KeyCode::Char('l') | KeyCode::Char('L') => {
+                app.planner_view = PlannerView::List;
+                return Ok(false);
+            }
+            KeyCode::Char('m') | KeyCode::Char('M') => {
+                app.planner_view = PlannerView::Matrix;
+                return Ok(false);
+            }
+            KeyCode::Char('1') if matches!(app.planner_view, PlannerView::Matrix) => {
+                if let Some(task) = app.tasks.get_mut(app.current_task_idx) {
+                    task.matrix = TaskMatrix::Do;
+                    let _ = save_app_data(app);
+                }
+                return Ok(false);
+            }
+            KeyCode::Char('2') if matches!(app.planner_view, PlannerView::Matrix) => {
+                if let Some(task) = app.tasks.get_mut(app.current_task_idx) {
+                    task.matrix = TaskMatrix::Schedule;
+                    let _ = save_app_data(app);
+                }
+                return Ok(false);
+            }
+            KeyCode::Char('3') if matches!(app.planner_view, PlannerView::Matrix) => {
+                if let Some(task) = app.tasks.get_mut(app.current_task_idx) {
+                    task.matrix = TaskMatrix::Delegate;
+                    let _ = save_app_data(app);
+                }
+                return Ok(false);
+            }
+            KeyCode::Char('4') if matches!(app.planner_view, PlannerView::Matrix) => {
+                if let Some(task) = app.tasks.get_mut(app.current_task_idx) {
+                    task.matrix = TaskMatrix::Eliminate;
+                    let _ = save_app_data(app);
+                }
+                return Ok(false);
+            }
+            _ => {}
+        }
+    }
+
     // Journal view keyboard shortcuts (when not editing)
     if !app.is_editing() && matches!(app.view_mode, ViewMode::Journal) {
         match key.code {
@@ -2968,6 +3044,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                     if matches!(mode, ViewMode::Journal) {
                         app.journal_view = JournalView::Entry;
                     }
+                    if matches!(mode, ViewMode::Planner) {
+                        app.planner_view = PlannerView::List;
+                    }
                     app.edit_target = EditTarget::None;
                     app.validate_indices();
                     return;
@@ -3143,15 +3222,61 @@ fn handle_textarea_mouse_click(app: &mut App, mouse: MouseEvent) {
 fn handle_planner_mouse_left(app: &mut App, mouse: MouseEvent) {
     // Handle textarea mouse clicks for editing
     handle_textarea_mouse_click(app, mouse);
-    
-    // Check task items to select
-    if let Some(idx) = find_clicked_item(mouse, &app.task_items.clone()) {
-        app.current_task_idx = idx;
+
+    if inside_rect(mouse, app.planner_list_btn) {
+        app.planner_view = PlannerView::List;
+        return;
+    }
+    if inside_rect(mouse, app.planner_matrix_btn) {
+        app.planner_view = PlannerView::Matrix;
         return;
     }
 
+    if matches!(app.planner_view, PlannerView::Matrix) {
+        if let Some(idx) = find_clicked_item(mouse, &app.matrix_items.clone()) {
+            app.current_task_idx = idx;
+            return;
+        }
+        if inside_rect(mouse, app.matrix_do_btn) {
+            if let Some(task) = app.tasks.get_mut(app.current_task_idx) {
+                task.matrix = TaskMatrix::Do;
+                let _ = save_app_data(app);
+            }
+            return;
+        }
+        if inside_rect(mouse, app.matrix_schedule_btn) {
+            if let Some(task) = app.tasks.get_mut(app.current_task_idx) {
+                task.matrix = TaskMatrix::Schedule;
+                let _ = save_app_data(app);
+            }
+            return;
+        }
+        if inside_rect(mouse, app.matrix_delegate_btn) {
+            if let Some(task) = app.tasks.get_mut(app.current_task_idx) {
+                task.matrix = TaskMatrix::Delegate;
+                let _ = save_app_data(app);
+            }
+            return;
+        }
+        if inside_rect(mouse, app.matrix_eliminate_btn) {
+            if let Some(task) = app.tasks.get_mut(app.current_task_idx) {
+                task.matrix = TaskMatrix::Eliminate;
+                let _ = save_app_data(app);
+            }
+            return;
+        }
+    }
+    
+    // Check task items to select
+    if matches!(app.planner_view, PlannerView::List) {
+        if let Some(idx) = find_clicked_item(mouse, &app.task_items.clone()) {
+            app.current_task_idx = idx;
+            return;
+        }
+    }
+
     // Check add task button
-    if inside_rect(mouse, app.add_task_btn) {
+    if matches!(app.planner_view, PlannerView::List) && inside_rect(mouse, app.add_task_btn) {
         start_editing(app, EditTarget::TaskTitle, new_task_editor_template());
         // Position cursor after first parameter (title line)
         app.textarea.move_cursor(CursorMove::Head);
@@ -3182,7 +3307,12 @@ fn handle_planner_mouse_left(app: &mut App, mouse: MouseEvent) {
 
 fn handle_planner_mouse_right(app: &mut App, mouse: MouseEvent) {
     // Right-click on task to delete
-    for (idx, rect) in app.task_items.clone() {
+    let items = if matches!(app.planner_view, PlannerView::Matrix) {
+        app.matrix_items.clone()
+    } else {
+        app.task_items.clone()
+    };
+    for (idx, rect) in items {
         if inside_rect(mouse, rect) {
             app.current_task_idx = idx;
             delete_and_adjust_index(&mut app.tasks, &mut app.current_task_idx);
@@ -3194,7 +3324,12 @@ fn handle_planner_mouse_right(app: &mut App, mouse: MouseEvent) {
 
 fn handle_planner_mouse_middle(app: &mut App, mouse: MouseEvent) {
     // Middle-click to toggle completion
-    if let Some(idx) = find_clicked_item(mouse, &app.task_items.clone()) {
+    let items = if matches!(app.planner_view, PlannerView::Matrix) {
+        app.matrix_items.clone()
+    } else {
+        app.task_items.clone()
+    };
+    if let Some(idx) = find_clicked_item(mouse, &items) {
         app.current_task_idx = idx;
         if let Some(task) = app.tasks.get_mut(idx) {
             task.completed = !task.completed;
@@ -5291,7 +5426,7 @@ fn task_help_lines() -> Vec<Line<'static>> {
         Line::from("Tasks PLANNER - TASK MANAGEMENT"),
         Line::from(""),
         Line::from("Features:"),
-        Line::from("  - Add tasks with priorities (High/Medium/Low)"),
+        Line::from("  - Add tasks with Eisenhower matrix (Do/Schedule/Delegate/Eliminate)"),
         Line::from("  - Set due dates and reminders with times"),
         Line::from("  - Track completion status"),
         Line::from("  - Recurring tasks (daily/weekly/monthly or date ranges)"),
@@ -5302,9 +5437,11 @@ fn task_help_lines() -> Vec<Line<'static>> {
         Line::from("  3. Add details on following lines"),
         Line::from("  4. Middle-click task to toggle done/undone"),
         Line::from("  5. Right-click task to delete it"),
-        Line::from("  6. Edit metadata inline: Title/Status/Priority/Due/Reminder/Repeat"),
+        Line::from("  6. Edit metadata inline: Title/Status/Matrix/Due/Reminder/Repeat"),
+        Line::from("  7. Use Eisenhower Matrix view to assign quadrants"),
         Line::from(""),
         Line::from("Special syntax in task editor:"),
+        Line::from("  - Matrix: Do | Schedule | Delegate | Eliminate"),
         Line::from("  - Reminder: 2025-12-25 09:00 or 2025-12-25"),
         Line::from("  - Repeat: daily|weekly|monthly"),
         Line::from("  - Repeat range: range 2025-12-01 to 2025-12-31 at 08:00"),
@@ -5327,6 +5464,35 @@ fn recurrence_label(rec: Recurrence) -> String {
                 format!("Range {} to {}", start, end)
             }
         }
+    }
+}
+
+fn task_matrix_label(matrix: TaskMatrix) -> &'static str {
+    match matrix {
+        TaskMatrix::Do => "Do",
+        TaskMatrix::Schedule => "Schedule",
+        TaskMatrix::Delegate => "Delegate",
+        TaskMatrix::Eliminate => "Eliminate",
+    }
+}
+
+fn parse_task_matrix(text: &str) -> Option<TaskMatrix> {
+    let lowered = text.trim().to_lowercase();
+    match lowered.as_str() {
+        "do" | "urgent important" | "important urgent" | "ui" | "iu" => Some(TaskMatrix::Do),
+        "high" => Some(TaskMatrix::Do),
+        "schedule" | "plan" | "important not urgent" | "not urgent important" | "inu" => {
+            Some(TaskMatrix::Schedule)
+        }
+        "medium" => Some(TaskMatrix::Schedule),
+        "delegate" | "urgent not important" | "not important urgent" | "uni" => {
+            Some(TaskMatrix::Delegate)
+        }
+        "low" => Some(TaskMatrix::Delegate),
+        "eliminate" | "delete" | "drop" | "not urgent not important" | "not important not urgent" | "nuni" | "ninu" => {
+            Some(TaskMatrix::Eliminate)
+        }
+        _ => None,
     }
 }
 
@@ -5386,10 +5552,10 @@ fn format_task_editor_content(task: &Task) -> String {
     };
 
     format!(
-        "Title: {}\nStatus: {}\nPriority: {:?}\nCreated: {}\nDue: {}\nReminder: {}\nRepeat: {}\n\nDescription:\n{}",
+        "Title: {}\nStatus: {}\nMatrix: {}\nCreated: {}\nDue: {}\nReminder: {}\nRepeat: {}\n\nDescription:\n{}",
         task.title,
         status,
-        task.priority,
+        task_matrix_label(task.matrix),
         task.created_at,
         due,
         reminder,
@@ -5405,7 +5571,7 @@ fn format_task_editor_content(task: &Task) -> String {
 fn new_task_editor_template() -> String {
     let today = Local::now().date_naive();
     format!(
-        "Title: \nStatus: Pending (options: Pending|Completed)\nPriority: Medium (options: High|Medium|Low)\nCreated: {}\nDue: Not set\nReminder: None (e.g. 2025-12-25 09:30)\nRepeat: none (options: none|daily|weekly|monthly|range YYYY-MM-DD to YYYY-MM-DD at HH:MM)\n\nDescription:\n",
+        "Title: \nStatus: Pending (options: Pending|Completed)\nMatrix: Schedule (options: Do|Schedule|Delegate|Eliminate)\nCreated: {}\nDue: Not set\nReminder: None (e.g. 2025-12-25 09:30)\nRepeat: none (options: none|daily|weekly|monthly|range YYYY-MM-DD to YYYY-MM-DD at HH:MM)\n\nDescription:\n",
         today
     )
 }
@@ -5419,7 +5585,7 @@ fn parse_task_editor_content(input: &str, existing: Option<&Task>, created_fallb
 
     let mut title: Option<String> = None;
     let mut status: Option<bool> = None;
-    let mut priority: Option<TaskPriority> = None;
+    let mut matrix: Option<TaskMatrix> = None;
     let mut created_at = task.created_at;
     let mut due: Option<NaiveDate> = None;
     let mut reminder_date: Option<NaiveDate> = None;
@@ -5461,12 +5627,17 @@ fn parse_task_editor_content(input: &str, existing: Option<&Task>, created_fallb
             continue;
         }
 
+        if lower.starts_with("matrix:") || lower.starts_with("eisenhower:") || lower.starts_with("quadrant:") {
+            let after = line.splitn(2, ':').nth(1).unwrap_or("").trim();
+            matrix = parse_task_matrix(after);
+            continue;
+        }
         if lower.starts_with("priority:") {
             let after = line.splitn(2, ':').nth(1).unwrap_or("").trim().to_lowercase();
-            priority = match after.as_str() {
-                "high" => Some(TaskPriority::High),
-                "medium" => Some(TaskPriority::Medium),
-                "low" => Some(TaskPriority::Low),
+            matrix = match after.as_str() {
+                "high" => Some(TaskMatrix::Do),
+                "medium" => Some(TaskMatrix::Schedule),
+                "low" => Some(TaskMatrix::Delegate),
                 _ => None,
             };
             continue;
@@ -5572,8 +5743,8 @@ fn parse_task_editor_content(input: &str, existing: Option<&Task>, created_fallb
     if let Some(s) = status {
         task.completed = s;
     }
-    if let Some(p) = priority {
-        task.priority = p;
+    if let Some(m) = matrix {
+        task.matrix = m;
     }
     task.created_at = created_at;
     task.due_date = due;
@@ -5602,13 +5773,10 @@ fn validate_task_status(text: &str) -> Result<bool, String> {
     }
 }
 
-fn validate_task_priority(text: &str) -> Result<TaskPriority, String> {
-    match text.trim().to_lowercase().as_str() {
-        "high" => Ok(TaskPriority::High),
-        "medium" => Ok(TaskPriority::Medium),
-        "low" => Ok(TaskPriority::Low),
-        _ => Err("Invalid Priority. Valid options: High|Medium|Low".to_string()),
-    }
+fn validate_task_matrix(text: &str) -> Result<TaskMatrix, String> {
+    parse_task_matrix(text).ok_or_else(|| {
+        "Invalid Matrix. Valid options: Do|Schedule|Delegate|Eliminate".to_string()
+    })
 }
 
 fn validate_task_recurrence(text: &str) -> Result<Recurrence, String> {
@@ -5896,9 +6064,9 @@ fn parse_and_validate_habit(
 }
 
 fn parse_and_validate_task(input: &str, existing: Option<&Task>) -> Result<Task, String> {
-    // First pass: extract Status, Priority, and Recurrence values
+    // First pass: extract Status, Matrix, and Recurrence values
     let mut status_value: Option<String> = None;
-    let mut priority_value: Option<String> = None;
+    let mut matrix_value: Option<String> = None;
     let mut repeat_value: Option<String> = None;
 
     for line in input.lines() {
@@ -5914,10 +6082,21 @@ fn parse_and_validate_task(input: &str, existing: Option<&Task>) -> Result<Task,
             }
         }
 
+        if let Some(rest) = trimmed
+            .strip_prefix("Matrix:")
+            .or_else(|| trimmed.strip_prefix("Eisenhower:"))
+            .or_else(|| trimmed.strip_prefix("Quadrant:"))
+        {
+            let value = rest.trim().split(" (options:").next().unwrap_or("").trim();
+            if !value.is_empty() {
+                matrix_value = Some(value.to_string());
+            }
+        }
+
         if let Some(rest) = trimmed.strip_prefix("Priority:") {
             let value = rest.trim().split(" (options:").next().unwrap_or("").trim();
             if !value.is_empty() {
-                priority_value = Some(value.to_string());
+                matrix_value = Some(value.to_string());
             }
         }
 
@@ -5938,13 +6117,13 @@ fn parse_and_validate_task(input: &str, existing: Option<&Task>) -> Result<Task,
         existing.map(|t| t.completed).unwrap_or(false)
     };
 
-    // Validate Priority
-    let priority = if let Some(prio) = priority_value {
-        validate_task_priority(&prio)?
+    // Validate Matrix
+    let matrix = if let Some(val) = matrix_value {
+        validate_task_matrix(&val)?
     } else if existing.is_none() {
-        TaskPriority::Medium
+        TaskMatrix::Schedule
     } else {
-        existing.map(|t| t.priority.clone()).unwrap_or(TaskPriority::Medium)
+        existing.map(|t| t.matrix).unwrap_or(TaskMatrix::Schedule)
     };
 
     // Validate Recurrence
@@ -5962,7 +6141,7 @@ fn parse_and_validate_task(input: &str, existing: Option<&Task>) -> Result<Task,
 
     // Override with validated values
     parsed.completed = completed;
-    parsed.priority = priority;
+    parsed.matrix = matrix;
     parsed.recurrence = recurrence;
 
     Ok(parsed)
@@ -6444,6 +6623,59 @@ fn calorie_help_lines() -> Vec<Line<'static>> {
 
 fn draw_planner_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(5)])
+        .split(area);
+
+    draw_planner_header(frame, app, chunks[0]);
+
+    match app.planner_view {
+        PlannerView::List => draw_planner_list_view(frame, app, chunks[1]),
+        PlannerView::Matrix => draw_planner_matrix_view(frame, app, chunks[1]),
+    }
+}
+
+fn draw_planner_header(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let list_style = if matches!(app.planner_view, PlannerView::List) {
+        Style::default()
+            .bg(Color::Blue)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+
+    let matrix_style = if matches!(app.planner_view, PlannerView::Matrix) {
+        Style::default()
+            .bg(Color::Blue)
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Yellow)
+    };
+
+    let list_btn = Paragraph::new("List")
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .style(list_style);
+    app.planner_list_btn = chunks[0];
+    frame.render_widget(list_btn, chunks[0]);
+
+    let matrix_btn = Paragraph::new("Eisenhower Matrix")
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .style(matrix_style);
+    app.planner_matrix_btn = chunks[1];
+    frame.render_widget(matrix_btn, chunks[1]);
+}
+
+fn draw_planner_list_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(area);
@@ -6453,6 +6685,130 @@ fn draw_planner_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
     // Task details / add panel
     draw_task_details(frame, app, chunks[1]);
+}
+
+fn draw_planner_matrix_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .split(area);
+
+    draw_matrix_panel(frame, app, chunks[0]);
+    draw_task_details(frame, app, chunks[1]);
+}
+
+fn draw_matrix_panel(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(7), Constraint::Min(5), Constraint::Length(3)])
+        .split(area);
+
+    draw_schedule_focus_list(frame, app, chunks[0]);
+    draw_matrix_grid(frame, app, chunks[1]);
+    draw_matrix_assign_buttons(frame, app, chunks[2]);
+}
+
+fn draw_schedule_focus_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let mut items = Vec::new();
+    app.matrix_items.clear();
+
+    let today = Local::now().date_naive();
+    let focus_items = app
+        .tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| matches!(t.matrix, TaskMatrix::Schedule))
+        .map(|(idx, task)| {
+            let due = task.due_date.map(|d| d.to_string()).unwrap_or_else(|| "No date".to_string());
+            let today_flag = if task.due_date == Some(today) { " • Today" } else { "" };
+            let text = format!("{}{}", task.title, format!(" ({}){}", due, today_flag));
+            (idx, text, task.completed)
+        })
+        .collect::<Vec<_>>();
+
+    items.extend(build_list_items(
+        focus_items,
+        app.current_task_idx,
+        area,
+        &mut app.matrix_items,
+    ));
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title("Schedule Focus (Today + Planned)")
+                .borders(Borders::ALL),
+        )
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(list, area);
+}
+
+fn draw_matrix_grid(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[0]);
+
+    let bottom = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[1]);
+
+    draw_matrix_quadrant(frame, app, top[0], TaskMatrix::Do, "Do (Urgent + Important)");
+    draw_matrix_quadrant(frame, app, top[1], TaskMatrix::Schedule, "Schedule (Important + Not Urgent)");
+    draw_matrix_quadrant(frame, app, bottom[0], TaskMatrix::Delegate, "Delegate (Urgent + Not Important)");
+    draw_matrix_quadrant(frame, app, bottom[1], TaskMatrix::Eliminate, "Eliminate (Not Urgent + Not Important)");
+}
+
+fn draw_matrix_quadrant(
+    frame: &mut ratatui::Frame,
+    app: &mut App,
+    area: Rect,
+    matrix: TaskMatrix,
+    title: &str,
+) {
+    let items_iter = app
+        .tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, task)| task.matrix == matrix)
+        .map(|(idx, task)| {
+            let title_first_line = task.title.lines().next().unwrap_or(&task.title);
+            let due_str = task
+                .due_date
+                .map(|d| format!(" ({})", d))
+                .unwrap_or_default();
+            let text = format!("{}{}", title_first_line, due_str);
+            (idx, text, task.completed)
+        })
+        .collect::<Vec<_>>();
+
+    let items = build_list_items(items_iter, app.current_task_idx, area, &mut app.matrix_items);
+    let list = List::new(items)
+        .block(Block::default().title(title).borders(Borders::ALL))
+        .style(Style::default().fg(Color::White));
+    frame.render_widget(list, area);
+}
+
+fn draw_matrix_assign_buttons(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let chunks = split_equal_horizontal(area, 4);
+
+    app.matrix_do_btn = chunks[0];
+    render_button(frame, "Assign Do", chunks[0], Color::Red);
+
+    app.matrix_schedule_btn = chunks[1];
+    render_button(frame, "Assign Schedule", chunks[1], Color::Yellow);
+
+    app.matrix_delegate_btn = chunks[2];
+    render_button(frame, "Assign Delegate", chunks[2], Color::Cyan);
+
+    app.matrix_eliminate_btn = chunks[3];
+    render_button(frame, "Assign Eliminate", chunks[3], Color::Gray);
 }
 
 fn draw_task_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
@@ -6477,10 +6833,11 @@ fn draw_task_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
         // Build list items using helper
         let list_data = app.tasks.iter().enumerate().map(|(idx, task)| {
             let checkbox = if task.completed { "[x]" } else { "[ ]" };
-            let priority_icon = match task.priority {
-                TaskPriority::High => "(High)",
-                TaskPriority::Medium => "(Med)",
-                TaskPriority::Low => "(Low)",
+            let matrix_icon = match task.matrix {
+                TaskMatrix::Do => "(Do)",
+                TaskMatrix::Schedule => "(Sched)",
+                TaskMatrix::Delegate => "(Del)",
+                TaskMatrix::Eliminate => "(Elim)",
             };
             let title_first_line = task.title.lines().next().unwrap_or(&task.title);
             let due_str = if let Some(due) = task.due_date {
@@ -6495,7 +6852,7 @@ fn draw_task_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
             };
             let text = format!(
                 "{} {} {}{}{}",
-                checkbox, priority_icon, title_first_line, due_str, reminder_icon
+                checkbox, matrix_icon, title_first_line, due_str, reminder_icon
             );
             (idx, text, task.completed)
         });
@@ -6577,14 +6934,14 @@ fn draw_task_details(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
         };
 
         let details = format!(
-            "Task: {}\n\nStatus: {}\nPriority: {:?}\nCreated: {}\nDue Date: {}{}{}{}\n\nEdit inline examples:\n- Status: Pending | Completed\n- Priority: High | Medium | Low\n- Reminder: 2025-12-25 09:00 | none | 'text'\n- Repeat: none | daily | weekly | monthly | range 2025-12-01 to 2025-12-31 at 08:00",
+            "Task: {}\n\nStatus: {}\nMatrix: {}\nCreated: {}\nDue Date: {}{}{}{}\n\nEdit inline examples:\n- Status: Pending | Completed\n- Matrix: Do | Schedule | Delegate | Eliminate\n- Reminder: 2025-12-25 09:00 | none | 'text'\n- Repeat: none | daily | weekly | monthly | range 2025-12-01 to 2025-12-31 at 08:00",
             task.title,
             if task.completed {
                 "Completed [check]"
             } else {
                 "Pending"
             },
-            task.priority,
+            task_matrix_label(task.matrix),
             task.created_at,
             task.due_date
                 .map(|d| d.to_string())

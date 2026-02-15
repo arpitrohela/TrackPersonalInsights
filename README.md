@@ -143,6 +143,15 @@ Content exceeding these limits is automatically truncated without error messages
 *   `Right Arrow`: Next day (in Mistake Book log)
 *   `T`: Jump to today (in Mistake Book log)
 
+### Planner View (when not editing)
+
+*   `L`: Task list view
+*   `M`: Eisenhower matrix view
+*   `1`: Assign Do (matrix view)
+*   `2`: Assign Schedule (matrix view)
+*   `3`: Assign Delegate (matrix view)
+*   `4`: Assign Eliminate (matrix view)
+
 ### Notes View (scrolling when not editing and not in search)
 
 *   `Up Arrow`: Scroll up
@@ -161,6 +170,17 @@ Content exceeding these limits is automatically truncated without error messages
 *   `Delete` / `Backspace`: Clear all (if `Ctrl+A` is active)
 *   `Mouse Wheel Up/Down`: Scroll editing content
 *   All other standard text editing keys (e.g., character input, arrow keys, Enter, Tab, Home, End, PageUp, PageDown, Esc, F-keys) are handled by the text area.
+
+### Planner Task Matrix
+
+Tasks use the Eisenhower matrix instead of priority. Values:
+
+*   `Do`: Urgent + Important
+*   `Schedule`: Important + Not Urgent
+*   `Delegate`: Urgent + Not Important
+*   `Eliminate`: Not Urgent + Not Important
+
+Planner includes an Eisenhower Matrix view with a Schedule Focus panel to quickly assign tasks and see planned items at a glance.
 
 ---
 
