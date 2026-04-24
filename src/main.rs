@@ -1,54 +1,14 @@
-// ============================================================================
-// MYNOTES - Multi-purpose Note-taking & Productivity Application
-// ============================================================================
-// 
-// MODULE STRUCTURE:
-// 1. Imports & Constants        - Dependencies and security limits
-// 2. Data Structures            - App, Task, Habit, Finance, Calories, etc.
-// 3. Serialization              - AppData persistence layer
-// 4. Helpers                    - Validation, popup rendering, edit completion
-// 5. Main Loop                  - Terminal UI initialization and event loop
-// 6. Event Handling             - Keyboard, mouse, UI interactions
-// 7. Editing Functions          - Input capture and data saving
-// 8. Rendering (Drawing)        - All UI output functions
-// 9. Parsers & Validators       - Input validation with error messages
-// 10. Formatters & Templates    - Editor templates and display helpers
-// 11. Utilities                 - Label functions and helper logic
-//
-// Each section is clearly marked with section headers for easy navigation.
-// ============================================================================
-
-use std::fs;
-use std::io;
-use std::path::PathBuf;
-use std::rc::Rc;
-use std::time::{Duration, Instant};
-
 use anyhow::Result;
 use chrono::{Datelike, Local, NaiveDate, NaiveTime};
-use crossterm::{
-    event::{
-        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-        MouseEventKind,
-    },
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
-use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
-    text::{Line, Span},
-    widgets::{Block, Borders, BorderType, Clear, List, ListItem, Paragraph, Wrap, Scrollbar, ScrollbarOrientation, ScrollbarState},
-};
-use std::collections::{BTreeSet, HashSet};
-use tui_textarea::{CursorMove, Input, Key, TextArea};
+use crossterm::{event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind}, execute, terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}};
+use ratatui::{backend::CrosstermBackend, layout::{Alignment, Constraint, Direction, Layout, Rect}, style::{Color, Modifier, Style, Stylize}, text::{Line, Span}, widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap}, Terminal};
+use std::{collections::{BTreeSet, HashSet}, env, fs, io, path::PathBuf, rc::Rc, time::{Duration, Instant}};
 use strsim::jaro_winkler;
-use std::env;
+use tui_textarea::{CursorMove, Input, Key, TextArea};
 
-// Persistence functions with security checks
-const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB max per file
+const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024;
+
+fn today() -> NaiveDate { Local::now().date_naive() }
 
 fn get_data_dir() -> Result<PathBuf> {
     if let Some(data_home) = dirs::data_dir() {
@@ -68,51 +28,31 @@ fn get_current_year_file() -> Result<PathBuf> {
 fn save_app_data(app: &App) -> Result<()> {
     let file_path = get_current_year_file()?;
     let serialized = bincode::serialize(&AppData::from_app(app))?;
-
-    // Security: Check serialized size before writing
     if serialized.len() > MAX_FILE_SIZE as usize {
-        return Err(anyhow::anyhow!(
-            "Serialized data exceeds maximum size limit"
-        ));
+        return Err(anyhow::anyhow!("Serialized data exceeds maximum size limit"));
     }
-
-    // Write to temporary file first, then atomic rename (safer)
     let temp_path = file_path.with_extension("bin.tmp");
     fs::write(&temp_path, serialized)?;
     fs::rename(temp_path, file_path)?;
-
     Ok(())
 }
 
 fn load_app_data() -> Result<App> {
     match get_current_year_file() {
         Ok(file_path) if file_path.exists() => {
-            // Security: Check file size before reading
-            let metadata = fs::metadata(&file_path)?;
-            if metadata.len() > MAX_FILE_SIZE {
-                return Err(anyhow::anyhow!(
-                    "Data file exceeds maximum size limit - possible corruption or attack"
-                ));
+            if fs::metadata(&file_path)?.len() > MAX_FILE_SIZE {
+                return Err(anyhow::anyhow!("Data file exceeds maximum size limit - possible corruption or attack"));
             }
-
             let data = fs::read(&file_path)?;
-
-            // Security: Deserialize and validate
-            let app_data: AppData = bincode::deserialize(&data).map_err(|e| {
-                anyhow::anyhow!("Failed to deserialize data (file may be corrupted): {}", e)
-            })?;
-
-            // Security: Validate indices before using them
+            let app_data: AppData = bincode::deserialize(&data).map_err(|e| anyhow::anyhow!("Failed to deserialize data (file may be corrupted): {}", e))?;
             let mut app = app_data.into_app();
             app.validate_indices();
-
             Ok(app)
         }
         _ => Ok(App::new()),
     }
 }
 
-// Serializable wrapper for App data (excludes UI state and regexes)
 #[derive(serde::Serialize, serde::Deserialize)]
 struct AppData {
     notebooks: Vec<Notebook>,
@@ -147,82 +87,76 @@ struct AppData {
 }
 
 impl AppData {
-    fn from_app(app: &App) -> Self {
+    fn from_app(a: &App) -> Self {
         Self {
-            notebooks: app.notebooks.clone(),
-            tasks: app.tasks.clone(),
-            journal_entries: app.journal_entries.clone(),
-            mistake_entries: app.mistake_entries.clone(),
-            habits: app.habits.clone(),
-            finances: app.finances.clone(),
-            calories: app.calories.clone(),
-            kanban_cards: app.kanban_cards.clone(),
-            cards: app.cards.clone(),
-            current_notebook_idx: app.current_notebook_idx,
-            current_section_idx: app.current_section_idx,
-            current_page_idx: app.current_page_idx,
-            current_task_idx: app.current_task_idx,
-            current_habit_idx: app.current_habit_idx,
-            current_finance_idx: app.current_finance_idx,
-            current_calorie_idx: app.current_calorie_idx,
-            current_kanban_card_idx: app.current_kanban_card_idx,
-            current_card_idx: app.current_card_idx,
-            current_journal_date: app.current_journal_date,
-            current_mistake_date: app.current_mistake_date,
-            view_mode: app.view_mode,
-            journal_view: app.journal_view,
-            planner_view: app.planner_view,
-            kanban_view: app.kanban_view,
+            notebooks: a.notebooks.clone(),
+            tasks: a.tasks.clone(),
+            journal_entries: a.journal_entries.clone(),
+            mistake_entries: a.mistake_entries.clone(),
+            habits: a.habits.clone(),
+            finances: a.finances.clone(),
+            calories: a.calories.clone(),
+            kanban_cards: a.kanban_cards.clone(),
+            cards: a.cards.clone(),
+            current_notebook_idx: a.current_notebook_idx,
+            current_section_idx: a.current_section_idx,
+            current_page_idx: a.current_page_idx,
+            current_task_idx: a.current_task_idx,
+            current_habit_idx: a.current_habit_idx,
+            current_finance_idx: a.current_finance_idx,
+            current_calorie_idx: a.current_calorie_idx,
+            current_kanban_card_idx: a.current_kanban_card_idx,
+            current_card_idx: a.current_card_idx,
+            current_journal_date: a.current_journal_date,
+            current_mistake_date: a.current_mistake_date,
+            view_mode: a.view_mode,
+            journal_view: a.journal_view,
+            planner_view: a.planner_view,
+            kanban_view: a.kanban_view,
         }
     }
 
     fn into_app(self) -> App {
-        let mut app = App::new();
-        app.notebooks = self.notebooks;
-        app.tasks = self.tasks;
-        app.journal_entries = self.journal_entries;
-        app.habits = self.habits;
-        app.finances = self.finances;
-        app.calories = self.calories;
-        app.kanban_cards = self.kanban_cards;
-        app.cards = self.cards;
-        app.current_notebook_idx = self
-            .current_notebook_idx
-            .min(app.notebooks.len().saturating_sub(1));
-        app.current_section_idx = self.current_section_idx;
-        app.current_page_idx = self.current_page_idx;
-        app.current_task_idx = self.current_task_idx;
-        app.current_habit_idx = self.current_habit_idx;
-        app.current_finance_idx = self.current_finance_idx;
-        app.current_calorie_idx = self.current_calorie_idx;
-        app.current_kanban_card_idx = self.current_kanban_card_idx;
-        app.current_card_idx = self.current_card_idx;
-        app.current_journal_date = self.current_journal_date;
-        app.current_mistake_date = self.current_mistake_date;
-        app.view_mode = self.view_mode;
-        app.journal_view = self.journal_view;
-        app.planner_view = self.planner_view;
-        app.kanban_view = self.kanban_view;
-        app
+        let mut a = App::new();
+        let Self { notebooks, tasks, journal_entries, mistake_entries, habits, finances, calories, kanban_cards, cards, current_notebook_idx, current_section_idx, current_page_idx, current_task_idx, current_habit_idx, current_finance_idx, current_calorie_idx, current_kanban_card_idx, current_card_idx, current_journal_date, current_mistake_date, view_mode, journal_view, planner_view, kanban_view } = self;
+        a.notebooks = notebooks;
+        a.tasks = tasks;
+        a.journal_entries = journal_entries;
+        a.mistake_entries = mistake_entries;
+        a.habits = habits;
+        a.finances = finances;
+        a.calories = calories;
+        a.kanban_cards = kanban_cards;
+        a.cards = cards;
+        a.current_notebook_idx = current_notebook_idx.min(a.notebooks.len().saturating_sub(1));
+        a.current_section_idx = current_section_idx;
+        a.current_page_idx = current_page_idx;
+        a.current_task_idx = current_task_idx;
+        a.current_habit_idx = current_habit_idx;
+        a.current_finance_idx = current_finance_idx;
+        a.current_calorie_idx = current_calorie_idx;
+        a.current_kanban_card_idx = current_kanban_card_idx;
+        a.current_card_idx = current_card_idx;
+        a.current_journal_date = current_journal_date;
+        a.current_mistake_date = current_mistake_date;
+        a.view_mode = view_mode;
+        a.journal_view = journal_view;
+        a.planner_view = planner_view;
+        a.kanban_view = kanban_view;
+        a
     }
 }
 
 fn default_current_mistake_date() -> NaiveDate {
-    Local::now().date_naive()
+    today()
 }
 
-// ============================================================================
-// HELPER FUNCTIONS - Consolidate repeated logic for cleaner code
-// ============================================================================
-
-/// Show validation error popup without saving
 #[inline]
 fn handle_validation_error(app: &mut App, error_msg: &str, context: &str) {
     app.show_validation_error = true;
     app.validation_error_message = format!("{} Error: {}\n\nPlease correct and try again.", context, error_msg);
 }
 
-/// Complete editing session and save data
 #[inline]
 fn complete_edit(app: &mut App) -> std::result::Result<(), Box<dyn std::error::Error>> {
     app.edit_target = EditTarget::None;
@@ -232,13 +166,16 @@ fn complete_edit(app: &mut App) -> std::result::Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-/// Get centered popup area for overlays
-fn get_popup_area(frame_width: u16, frame_height: u16, width_percent: u16, height_percent: u16) -> Rect {
-    let width = frame_width.saturating_mul(width_percent as u16) / 100;
-    let height = frame_height.saturating_mul(height_percent as u16) / 100;
-    let x = (frame_width.saturating_sub(width)) / 2;
-    let y = (frame_height.saturating_sub(height)) / 2;
-    Rect { x, y, width, height }
+fn get_popup_area(fw: u16, fh: u16, wp: u16, hp: u16) -> Rect {
+    let width = fw.saturating_mul(wp) / 100;
+    let height = fh.saturating_mul(hp) / 100;
+    Rect { x: (fw.saturating_sub(width)) / 2, y: (fh.saturating_sub(height)) / 2, width, height }
+}
+
+fn clamp_index(idx: &mut usize, len: usize) {
+    if *idx >= len {
+        *idx = 0;
+    }
 }
 
 fn main() {
@@ -253,71 +190,43 @@ fn run() -> Result<()> {
     execute!(stdout, EnterAlternateScreen, event::EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-
     let res = run_app(&mut terminal);
-
     disable_raw_mode().ok();
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        event::DisableMouseCapture
-    )
-    .ok();
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, event::DisableMouseCapture).ok();
     terminal.show_cursor().ok();
-
     res
 }
-
-// Hierarchical Note Structure
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Page {
     title: String,
     content: String,
     modified_at: NaiveDate,
-    links: Vec<String>,  // URLs or note references
-    images: Vec<String>, // Image file paths
+    links: Vec<String>,
+    images: Vec<String>,
 }
 
 impl Page {
     fn new(title: String) -> Self {
-        Self {
-            title,
-            content: String::new(),
-            modified_at: Local::now().date_naive(),
-            links: Vec::new(),
-            images: Vec::new(),
-        }
+        Self { title, content: String::new(), modified_at: today(), links: Vec::new(), images: Vec::new() }
     }
 
     fn extract_links_and_images(&mut self) {
         self.links.clear();
         self.images.clear();
-
         let mut seen_links = std::collections::BTreeSet::new();
         let mut seen_images = std::collections::BTreeSet::new();
-
         for line in self.content.lines() {
-            // Extract HTTP/HTTPS URLs as links
             for part in line.split_whitespace() {
                 let lower = part.to_lowercase();
-                if (lower.starts_with("http://") || lower.starts_with("https://"))
-                    && !seen_links.contains(part)
-                {
+                if (lower.starts_with("http://") || lower.starts_with("https://")) && !seen_links.contains(part) {
                     seen_links.insert(part.to_string());
                     self.links.push(part.to_string());
                 }
             }
-
-            // Extract local file paths as potential images (only image extensions)
             if let Some(token) = extract_path(line) {
                 let lower = token.to_lowercase();
-                let is_image = [
-                    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".svg",
-                ]
-                .iter()
-                .any(|ext| lower.ends_with(ext));
-
+                let is_image = [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".svg"].iter().any(|e| lower.ends_with(e));
                 if is_image && !seen_images.contains(&token) {
                     seen_images.insert(token.clone());
                     self.images.push(token);
@@ -326,13 +235,11 @@ impl Page {
         }
     }
 
-    // Automatically update the page title from the first few words of content
     fn update_title_from_content(&mut self) {
         if let Some(first_line) = self.content.lines().next() {
             let words: Vec<&str> = first_line.split_whitespace().take(6).collect();
             if !words.is_empty() {
                 self.title = words.join(" ");
-                // Truncate if too long (max 50 chars for display)
                 if self.title.len() > 50 {
                     self.title.truncate(47);
                     self.title.push_str("...");
@@ -351,11 +258,7 @@ struct Section {
 
 impl Section {
     fn new(title: String) -> Self {
-        Self {
-            title,
-            pages: Vec::new(),
-            created_at: Local::now().date_naive(),
-        }
+        Self { title, pages: Vec::new(), created_at: today() }
     }
 }
 
@@ -368,11 +271,7 @@ struct Notebook {
 
 impl Notebook {
     fn new(title: String) -> Self {
-        Self {
-            title,
-            sections: Vec::new(),
-            created_at: Local::now().date_naive(),
-        }
+        Self { title, sections: Vec::new(), created_at: today() }
     }
 }
 
@@ -419,33 +318,30 @@ enum KanbanStage {
 impl KanbanStage {
     fn label(&self) -> &'static str {
         match self {
-            KanbanStage::Todo => "To Do",
-            KanbanStage::Doing => "In Progress",
-            KanbanStage::Done => "Done",
+            Self::Todo => "To Do",
+            Self::Doing => "In Progress",
+            Self::Done => "Done",
         }
     }
-
     fn color(&self) -> Color {
         match self {
-            KanbanStage::Todo => Color::Cyan,
-            KanbanStage::Doing => Color::Yellow,
-            KanbanStage::Done => Color::Green,
+            Self::Todo => Color::Cyan,
+            Self::Doing => Color::Yellow,
+            Self::Done => Color::Green,
         }
     }
-
-    fn move_left(self) -> KanbanStage {
+    fn move_left(self) -> Self {
         match self {
-            KanbanStage::Todo => KanbanStage::Todo,
-            KanbanStage::Doing => KanbanStage::Todo,
-            KanbanStage::Done => KanbanStage::Doing,
+            Self::Doing => Self::Todo,
+            Self::Done => Self::Doing,
+            s => s,
         }
     }
-
-    fn move_right(self) -> KanbanStage {
+    fn move_right(self) -> Self {
         match self {
-            KanbanStage::Todo => KanbanStage::Doing,
-            KanbanStage::Doing => KanbanStage::Done,
-            KanbanStage::Done => KanbanStage::Done,
+            Self::Todo => Self::Doing,
+            Self::Doing => Self::Done,
+            s => s,
         }
     }
 }
@@ -464,14 +360,7 @@ struct KanbanCard {
 
 impl KanbanCard {
     fn new(title: String, note: String) -> Self {
-        Self {
-            title,
-            note,
-            stage: KanbanStage::Todo,
-            matrix: TaskMatrix::Schedule,
-            due_date: None,
-            created_at: Local::now().date_naive(),
-        }
+        Self { title, note, stage: KanbanStage::Todo, matrix: TaskMatrix::Schedule, due_date: None, created_at: today() }
     }
 }
 
@@ -488,15 +377,14 @@ enum HabitStatus {
 fn default_habit_status() -> HabitStatus {
     HabitStatus::Active
 }
-
 fn default_habit_start_date() -> NaiveDate {
-    Local::now().date_naive()
+    today()
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Habit {
     name: String,
-    frequency: Recurrence, // use Recurrence for simplicity
+    frequency: Recurrence,
     streak: u32,
     marks: HashSet<NaiveDate>,
     #[serde(default = "default_habit_status")]
@@ -509,15 +397,7 @@ struct Habit {
 
 impl Habit {
     fn new(name: String) -> Self {
-        Self {
-            name,
-            frequency: Recurrence::Daily,
-            streak: 0,
-            marks: HashSet::new(),
-            status: HabitStatus::Active,
-            start_date: Local::now().date_naive(),
-            notes: String::new(),
-        }
+        Self { name, frequency: Recurrence::Daily, streak: 0, marks: HashSet::new(), status: HabitStatus::Active, start_date: today(), notes: String::new() }
     }
 }
 
@@ -531,12 +411,7 @@ struct FinanceEntry {
 
 impl FinanceEntry {
     fn new(date: NaiveDate, category: String, note: String, amount: f64) -> Self {
-        Self {
-            date,
-            category,
-            note,
-            amount,
-        }
+        Self { date, category, note, amount }
     }
 }
 
@@ -550,16 +425,10 @@ struct CalorieEntry {
 
 impl CalorieEntry {
     fn new(date: NaiveDate, meal: String, note: String, calories: u32) -> Self {
-        Self {
-            date,
-            meal,
-            note,
-            calories,
-        }
+        Self { date, meal, note, calories }
     }
 }
 
-// Spaced Repetition Card (SM-2 Algorithm)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Card {
     front: String,
@@ -568,8 +437,8 @@ struct Card {
     created_at: NaiveDate,
     last_reviewed: Option<NaiveDate>,
     next_review: NaiveDate,
-    ease_factor: f32, // SM-2 algorithm
-    interval: u32,     // days
+    ease_factor: f32,
+    interval: u32,
     repetitions: u32,
     tags: Vec<String>,
     collection: Option<String>,
@@ -577,9 +446,9 @@ struct Card {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 enum CardType {
-    Basic,           // front/back
-    Cloze,           // text with {{c1::deletion}}
-    MultipleChoice,  // front with options in back
+    Basic,
+    Cloze,
+    MultipleChoice,
 }
 
 impl<'de> serde::Deserialize<'de> for CardType {
@@ -588,17 +457,11 @@ impl<'de> serde::Deserialize<'de> for CardType {
         D: serde::Deserializer<'de>,
     {
         let raw = <String as serde::Deserialize>::deserialize(deserializer)?;
-        let norm = raw.trim().to_lowercase();
-        match norm.as_str() {
+        match raw.trim().to_lowercase().as_str() {
             "basic" | "frontback" | "front_back" => Ok(CardType::Basic),
             "cloze" => Ok(CardType::Cloze),
-            "mc" | "multiplechoice" | "multiple choice" | "multiple_choice" => {
-                Ok(CardType::MultipleChoice)
-            }
-            other => Err(serde::de::Error::custom(format!(
-                "unknown card_type '{}'; use basic, cloze, or mc/multiplechoice",
-                other
-            ))),
+            "mc" | "multiplechoice" | "multiple choice" | "multiple_choice" => Ok(CardType::MultipleChoice),
+            other => Err(serde::de::Error::custom(format!("unknown card_type '{}'; use basic, cloze, or mc/multiplechoice", other))),
         }
     }
 }
@@ -606,302 +469,126 @@ impl<'de> serde::Deserialize<'de> for CardType {
 #[derive(Debug, Clone, PartialEq)]
 enum CardFilter {
     All,
-    New,                    // Never reviewed
-    Due,                    // Due for review today
-    Blackout,               // Quality 0: Complete failure
-    Hard,                   // Quality 1-2: Difficult
-    Medium,                 // Quality 3: Passing
-    Easy,                   // Quality 4: Good
-    Perfect,                // Quality 5: Perfect
-    Mastered,               // High repetitions and ease
-    Collection(String),     // By collection name
+    New,
+    Due,
+    Blackout,
+    Hard,
+    Medium,
+    Easy,
+    Perfect,
+    Mastered,
+    Collection(String),
 }
 
 impl Card {
     fn new(front: String, back: String, card_type: CardType) -> Self {
-        Self {
-            front,
-            back,
-            card_type,
-            created_at: Local::now().date_naive(),
-            last_reviewed: None,
-            next_review: Local::now().date_naive(),
-            ease_factor: 2.5,
-            interval: 0,
-            repetitions: 0,
-            tags: Vec::new(),
-            collection: None,
-        }
+        let today = today();
+        Self { front, back, card_type, created_at: today, last_reviewed: None, next_review: today, ease_factor: 2.5, interval: 0, repetitions: 0, tags: Vec::new(), collection: None }
     }
 
-    // SM-2 Algorithm for spaced repetition
+    // SM-2 spaced repetition. quality: 0-5.
     fn review(&mut self, quality: u8) {
-        // quality: 0-5 (0=total blackout, 5=perfect response)
         let quality = quality.min(5) as f32;
-        
         if quality < 3.0 {
-            // Failed recall - reset
             self.repetitions = 0;
             self.interval = 1;
         } else {
-            // Successful recall
-            if self.repetitions == 0 {
-                self.interval = 1;
-            } else if self.repetitions == 1 {
-                self.interval = 6;
-            } else {
-                self.interval = (self.interval as f32 * self.ease_factor).round() as u32;
-            }
+            self.interval = match self.repetitions {
+                0 => 1,
+                1 => 6,
+                _ => (self.interval as f32 * self.ease_factor).round() as u32,
+            };
             self.repetitions += 1;
         }
-        
-        // Update ease factor
         self.ease_factor = (self.ease_factor + (0.1 - (5.0 - quality) * (0.08 + (5.0 - quality) * 0.02))).max(1.3);
-        
-        // Set next review date
-        self.last_reviewed = Some(Local::now().date_naive());
-        self.next_review = Local::now().date_naive() + chrono::Duration::days(self.interval as i64);
+        let today = today();
+        self.last_reviewed = Some(today);
+        self.next_review = today + chrono::Duration::days(self.interval as i64);
     }
-    
+
     fn is_due(&self) -> bool {
-        self.next_review <= Local::now().date_naive()
+        self.next_review <= today()
     }
 }
 
 impl Task {
     fn new(title: String, description: String) -> Self {
-        Self {
-            title,
-            description,
-            completed: false,
-            matrix: TaskMatrix::Schedule,
-            due_date: None,
-            reminder_text: None,
-            reminder_date: None,
-            reminder_time: None,
-            recurrence: Recurrence::None,
-            created_at: Local::now().date_naive(),
-        }
+        Self { title, description, completed: false, matrix: TaskMatrix::Schedule, due_date: None, reminder_text: None, reminder_date: None, reminder_time: None, recurrence: Recurrence::None, created_at: today() }
     }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct JournalEntry {
-    date: NaiveDate,
-    content: String,
-    mood: Option<String>,
-}
+struct JournalEntry { date: NaiveDate, content: String, mood: Option<String> }
 
 impl JournalEntry {
     fn new(date: NaiveDate) -> Self {
-        Self {
-            date,
-            content: String::new(),
-            mood: None,
-        }
+        Self { date, content: String::new(), mood: None }
     }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct MistakeEntry {
-    date: NaiveDate,
-    content: String,
-}
+struct MistakeEntry { date: NaiveDate, content: String }
 
 impl MistakeEntry {
     fn new(date: NaiveDate) -> Self {
-        Self {
-            date,
-            content: String::new(),
-        }
+        Self { date, content: String::new() }
     }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
-enum HierarchyLevel {
-    Notebook,
-    Section,
-    Page,
-}
+enum HierarchyLevel { Notebook, Section, Page }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
-enum FindMode {
-    Content,  // Current page content
-    AllNotes, // All notebooks
-}
+enum FindMode { Content, AllNotes }
 
 #[allow(dead_code)]
-enum EditTarget {
-    None,
-    NotebookTitle,
-    SectionTitle,
-    PageTitle,
-    PageContent,
-    JournalEntry,
-    MistakeEntry,
-    TaskTitle,
-    TaskDetails,
-    HabitNew,
-    Habit,
-    FinanceNew,
-    Finance,
-    CaloriesNew,
-    Calories,
-    KanbanNew,
-    KanbanEdit,
-    CardNew,
-    CardEdit,
-    CardImport,
-    FindReplace,
-}
+enum EditTarget { None, NotebookTitle, SectionTitle, PageTitle, PageContent, JournalEntry, MistakeEntry, TaskTitle, TaskDetails, HabitNew, Habit, FinanceNew, Finance, CaloriesNew, Calories, KanbanNew, KanbanEdit, CardNew, CardEdit, CardImport, FindReplace }
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-enum ViewMode {
-    Notes,
-    Planner,
-    Journal,
-    Habits,
-    Finance,
-    Calories,
-    Kanban,
-    Flashcards,
-}
+enum ViewMode { Notes, Planner, Journal, Habits, Finance, Calories, Kanban, Flashcards }
 
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-enum PlannerView {
-    List,
-    Matrix,
-}
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+enum PlannerView { #[default] List, Matrix }
 
-impl Default for PlannerView {
-    fn default() -> Self {
-        PlannerView::List
-    }
-}
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+enum KanbanView { #[default] Board, Matrix }
 
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-enum KanbanView {
-    Board,
-    Matrix,
-}
-
-impl Default for KanbanView {
-    fn default() -> Self {
-        KanbanView::Board
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-enum JournalView {
-    Entry,
-    MistakeList,
-    MistakeLog,
-}
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+enum JournalView { #[default] Entry, MistakeList, MistakeLog }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CalendarTarget {
-    Journal,
-    MistakeBook,
-}
-
-impl Default for JournalView {
-    fn default() -> Self {
-        JournalView::Entry
-    }
-}
+enum CalendarTarget { Journal, MistakeBook }
 
 #[derive(Clone, Copy)]
-enum SearchTarget {
-    Note { notebook_idx: usize, section_idx: usize, page_idx: usize },
-    Task { idx: usize },
-    Journal { date: NaiveDate },
-    MistakeBook { date: NaiveDate },
-    Habit { idx: usize, date: Option<NaiveDate> },
-    Finance { idx: usize, date: NaiveDate },
-    Calorie { idx: usize, date: NaiveDate },
-    Kanban { idx: usize },
-    Card { idx: usize },
-    Help,
-}
+enum SearchTarget { Note { notebook_idx: usize, section_idx: usize, page_idx: usize }, Task { idx: usize }, Journal { date: NaiveDate }, MistakeBook { date: NaiveDate }, Habit { idx: usize, date: Option<NaiveDate> }, Finance { idx: usize, date: NaiveDate }, Calorie { idx: usize, date: NaiveDate }, Kanban { idx: usize }, Card { idx: usize }, Help }
 
 #[derive(Clone)]
-struct SearchHit {
-    title: String,
-    detail: String,
-    target: SearchTarget,
-    score: i32,
-}
+struct SearchHit { title: String, detail: String, target: SearchTarget, score: i32 }
 
-struct HelpTopic {
-    title: &'static str,
-    detail: &'static str,
-}
+struct HelpTopic { title: &'static str, detail: &'static str }
 
 const HELP_TOPICS: &[HelpTopic] = &[
-    HelpTopic {
-        title: "Open Help",
-        detail: "Press ? to pop this help open, type to filter, Esc to hide it.",
-    },
-    HelpTopic {
-        title: "Global Search",
-        detail: "Hit Ctrl+F (or Search button), type what you need, move with ↑/↓, press Enter to jump there.",
-    },
-    HelpTopic {
-        title: "Spell Check",
-        detail: "Press F7 while editing. Walk results with ↑/↓, fix with Enter or keys 1-5, add with 'a'. For a real dictionary: point SPELL_DICT_PATH (or MYNOTES_SPELL_DICT) to your wordlist, or install /usr/share/dict/words on Linux. On Windows, you must supply a wordlist via the env var. Otherwise I fall back to the bundled basic list.",
-    },
-    HelpTopic {
-        title: "Flashcard Bulk Actions",
-        detail: "Go to List View, Shift+Up/Down to multi-select cards, then click Bulk Delete or Bulk Disassociate at the bottom.",
-    },
-    HelpTopic {
-        title: "Flashcard Filters",
-        detail: "Click Filter to cycle New, Due, difficulty bands, or collections. Bulk actions only touch what the current filter shows.",
-    },
-    HelpTopic {
-        title: "Mouse Basics",
-        detail: "Left-click to select, double-click a flashcard to review, middle-click a tree item to rename, right-click for context actions.",
-    },
-    HelpTopic {
-        title: "Editing & Saving",
-        detail: "Ctrl+S saves, Esc cancels, Space reveals a flashcard answer, Enter starts review from the card list.",
-    },
-    HelpTopic {
-        title: "Add Images & Files",
-        detail: "Paste a full path (e.g., /home/you/Pictures/pic.png or ~/Pictures/pic.png). Markdown links [alt](~/path) and [alt][~/path] work too. Leave edit mode and click the line to open it with your system app.",
-    },
-    HelpTopic {
-        title: "Notes Section View",
-        detail: "Click a section in the tree to read all its pages in one stream. Scroll to skim; pick a specific page to edit it.",
-    },
-    HelpTopic {
-        title: "Cloud Backup & Sync",
-        detail: "I save to ~/.local/share/mynotes/{year}.bin. Upload that file to Drive/Dropbox/OneDrive to back up. Pull it down on another machine to continue where you left off.",
-    },
+    HelpTopic { title: "Open Help", detail: "Press ? to pop this help open, type to filter, Esc to hide it." },
+    HelpTopic { title: "Global Search", detail: "Hit Ctrl+F (or Search button), type what you need, move with ↑/↓, press Enter to jump there." },
+    HelpTopic { title: "Spell Check", detail: "Press F7 while editing. Walk results with ↑/↓, fix with Enter or keys 1-5, add with 'a'. For a real dictionary: point SPELL_DICT_PATH (or MYNOTES_SPELL_DICT) to your wordlist, or install /usr/share/dict/words on Linux. On Windows, you must supply a wordlist via the env var. Otherwise I fall back to the bundled basic list." },
+    HelpTopic { title: "Flashcard Bulk Actions", detail: "Go to List View, Shift+Up/Down to multi-select cards, then click Bulk Delete or Bulk Disassociate at the bottom." },
+    HelpTopic { title: "Flashcard Filters", detail: "Click Filter to cycle New, Due, difficulty bands, or collections. Bulk actions only touch what the current filter shows." },
+    HelpTopic { title: "Mouse Basics", detail: "Left-click to select, double-click a flashcard to review, middle-click a tree item to rename, right-click for context actions." },
+    HelpTopic { title: "Editing & Saving", detail: "Ctrl+S saves, Esc cancels, Space reveals a flashcard answer, Enter starts review from the card list." },
+    HelpTopic { title: "Add Images & Files", detail: "Paste a full path (e.g., /home/you/Pictures/pic.png or ~/Pictures/pic.png). Markdown links [alt](~/path) and [alt][~/path] work too. Leave edit mode and click the line to open it with your system app." },
+    HelpTopic { title: "Notes Section View", detail: "Click a section in the tree to read all its pages in one stream. Scroll to skim; pick a specific page to edit it." },
+    HelpTopic { title: "Cloud Backup & Sync", detail: "I save to ~/.local/share/mynotes/{year}.bin. Upload that file to Drive/Dropbox/OneDrive to back up. Pull it down on another machine to continue where you left off." },
 ];
 
 #[derive(Clone)]
-struct SpellCheckResult {
-    word: String,
-    suggestions: Vec<String>,
-    line_number: usize,
-    column: usize,
-}
+struct SpellCheckResult { word: String, suggestions: Vec<String>, line_number: usize, column: usize }
 
-struct SimpleDictionary {
-    words: HashSet<String>,
-}
+struct SimpleDictionary { words: HashSet<String> }
 
 impl SimpleDictionary {
     fn from_wordlist(list: &str) -> Self {
-        let mut words = HashSet::new();
-        for line in list.lines() {
-            let w = line.trim().to_lowercase();
-            if !w.is_empty() {
-                words.insert(w);
-            }
-        }
+        let words = list.lines().map(|l| l.trim().to_lowercase()).filter(|w| !w.is_empty()).collect();
         Self { words }
     }
 
@@ -912,18 +599,9 @@ impl SimpleDictionary {
 
     fn suggest(&self, word: &str, custom: &HashSet<String>, limit: usize) -> Vec<String> {
         let target = word.to_lowercase();
-        let mut candidates: Vec<(f64, &str)> = self
-            .words
-            .iter()
-            .filter(|w| !custom.contains(*w))
-            .map(|w| (jaro_winkler(&target, w), w.as_str()))
-            .collect();
+        let mut candidates: Vec<(f64, &str)> = self.words.iter().filter(|w| !custom.contains(*w)).map(|w| (jaro_winkler(&target, w), w.as_str())).collect();
         candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        candidates
-            .into_iter()
-            .take(limit)
-            .map(|(_, w)| w.to_string())
-            .collect()
+        candidates.into_iter().take(limit).map(|(_, w)| w.to_string()).collect()
     }
 }
 
@@ -934,15 +612,11 @@ struct App {
     current_page_idx: usize,
     hierarchy_level: HierarchyLevel,
     editing_input: String,
-    textarea: TextArea<'static>, // Professional text editor
+    textarea: TextArea<'static>,
     edit_target: EditTarget,
-
-    // View mode
     view_mode: ViewMode,
     planner_view: PlannerView,
     kanban_view: KanbanView,
-
-    // Planner & Journal
     tasks: Vec<Task>,
     current_task_idx: usize,
     journal_entries: Vec<JournalEntry>,
@@ -950,19 +624,14 @@ struct App {
     mistake_entries: Vec<MistakeEntry>,
     current_mistake_date: NaiveDate,
     journal_view: JournalView,
-    // Habits
     habits: Vec<Habit>,
     current_habit_idx: usize,
-    // Finance
     finances: Vec<FinanceEntry>,
     current_finance_idx: usize,
-    // Calories
     calories: Vec<CalorieEntry>,
     current_calorie_idx: usize,
-    // Kanban
     kanban_cards: Vec<KanbanCard>,
     current_kanban_card_idx: usize,
-    // Flashcards (Spaced Repetition)
     cards: Vec<Card>,
     current_card_idx: usize,
     show_card_answer: bool,
@@ -970,10 +639,8 @@ struct App {
     card_filter: CardFilter,
     card_selection_anchor: Option<usize>,
     selected_card_indices: BTreeSet<usize>,
-
-    // UI areas for mouse support
     tree_items: Vec<(HierarchyLevel, usize, usize, usize, Rect)>,
-    task_items: Vec<(usize, Rect)>, // (task_idx, clickable area)
+    task_items: Vec<(usize, Rect)>,
     habit_items: Vec<(usize, Rect)>,
     finance_items: Vec<(usize, Rect)>,
     calorie_items: Vec<(usize, Rect)>,
@@ -1017,7 +684,6 @@ struct App {
     show_card_import_help: bool,
     card_import_help_scroll: u16,
     card_import_help_text_area: Rect,
-    // Store a pending path typed for import (saved via Ctrl+S)
     pending_card_import_path: Option<String>,
     add_kanban_btn: Rect,
     move_left_kanban_btn: Rect,
@@ -1050,38 +716,23 @@ struct App {
     search_result_items: Vec<(usize, Rect)>,
     mistake_list_items: Vec<(usize, Rect)>,
     mistake_list_dates: Vec<NaiveDate>,
-
-    // Content scrolling (Notes view)
     content_scroll: u16,
-    textarea_scroll: u16, // Scroll position for textarea editor
-
-    // Selection state for editing
+    textarea_scroll: u16,
     selection_all: bool,
-
-    // Editing caret support
     editing_cursor_line: usize,
     editing_cursor_col: usize,
-
-    // Calendar picker state
     show_calendar: bool,
     calendar_year: i32,
     calendar_month: u32,
-    calendar_day_rects: Vec<(u32, Rect)>, // (day, clickable rect)
+    calendar_day_rects: Vec<(u32, Rect)>,
     calendar_target: CalendarTarget,
-
-    // Inline editing (click line to edit)
-    editing_line_index: usize, // Which line is being edited
-    inline_edit_mode: bool,    // Are we editing a single line inline?
-
-
-    // Find and Replace
+    editing_line_index: usize,
+    inline_edit_mode: bool,
     find_text: String,
     replace_text: String,
     #[allow(dead_code)]
     find_mode: FindMode,
-    find_input_focus: bool, // true = find field, false = replace field
-
-    // Global fuzzy search
+    find_input_focus: bool,
     show_global_search: bool,
     global_search_query: String,
     global_search_results: Vec<SearchHit>,
@@ -1089,220 +740,133 @@ struct App {
     show_help_overlay: bool,
     help_search_query: String,
     help_scroll: u16,
-
-    // Validation error popup
     show_validation_error: bool,
     validation_error_message: String,
-    // Success popup
     show_success_popup: bool,
     success_message: String,
-
-    // Editor undo/redo stacks (only for content editor)
     undo_stack: Vec<String>,
-
-    // Spell checker
+    redo_stack: Vec<String>,
     spell_dict: Option<SimpleDictionary>,
     show_spell_check: bool,
     spell_check_results: Vec<SpellCheckResult>,
     spell_check_selected: usize,
     spell_check_scroll: u16,
     custom_words: HashSet<String>,
-    redo_stack: Vec<String>,
+}
+
+fn default_notebook() -> Notebook {
+    let mut notebook = Notebook::new("My Notes".to_string());
+    let mut section = Section::new("Getting Started".to_string());
+    let mut page = Page::new("Welcome & Tutorial".to_string());
+    page.content = r#"MYNOTES - QUICK TUTORIAL
+
+NAVIGATE: Click tree to select. Middle-click = rename. Right-click = delete.
+EDIT: Click content to edit. Ctrl+S save, Esc cancel, Ctrl+A/K/Z/Y standard.
+FILES: Paste absolute or ~ paths; click line in read mode to open.
+CODE: wrap with ```lang ... ```
+
+KEYS: Ctrl+S save · Esc cancel · Ctrl+F search · ? help · F7 spell check
+      Up/Down/PgUp/PgDn or mouse wheel to scroll
+
+VIEWS: Notes · Planner · Journal · Habits · Finance · Calories · Kanban · Flashcards
+
+FLASHCARDS: SM-2 spaced repetition. Space reveals, 0-5 rates quality.
+Import CSV (front,back[,type,collection]) or JSON. Filter cycles:
+All / New / Due / Blackout / Hard / Medium / Easy / Perfect / Mastered / Collection
+
+TABLES: Lines starting with | render as tables; use |---|---| for separator.
+FLOW:   > step, - detail, 1. numbered. [A] -> [B] -> [C] renders arrows.
+SYNC:   Data lives at ~/.local/share/mynotes/{year}.bin — back up or copy to sync."#
+        .to_string();
+    page.extract_links_and_images();
+    section.pages.push(page);
+    notebook.sections.push(section);
+    notebook
+}
+
+fn default_kanban_cards(today: NaiveDate) -> Vec<KanbanCard> {
+    let card = |title: &str, note: &str, stage, matrix| KanbanCard { title: title.into(), note: note.into(), stage, matrix, due_date: None, created_at: today };
+    vec![card("Sketch backlog", "Status: Planned\nOwner: (assign)\nRoadblocks: None yet\nNext step: Draft 5-7 candidate tasks\nLinks/Refs: --", KanbanStage::Todo, TaskMatrix::Schedule), card("Prioritize top 3", "Status: In Progress\nOwner: (assign)\nRoadblocks: Waiting on estimates?\nNext step: Rank top 3, mark owners\nLinks/Refs: --", KanbanStage::Doing, TaskMatrix::Do), card("Wrap a win", "Status: Done (template)\nOwner: (assign)\nRoadblocks: None\nNext step: Demo & announce\nLinks/Refs: --", KanbanStage::Done, TaskMatrix::Delegate)]
 }
 
 impl App {
     fn new() -> Self {
-        let mut default_notebook = Notebook::new("My Notes".to_string());
-        default_notebook
-            .sections
-            .push(Section::new("Getting Started".to_string()));
-        if let Some(section) = default_notebook.sections.get_mut(0) {
-            section
-                .pages
-                .push(Page::new("Welcome & Tutorial".to_string()));
-            if let Some(page) = section.pages.get_mut(0) {
-                page.content = r#"MYNOTES - COMPLETE TUTORIAL
-
-NAVIGATION & SELECTION
-------------------------------
-- Click tree items to navigate notebooks/sections/pages
-- Middle-click items to rename them
-- Right-click items to delete them
-- In Planner: Middle-click a task to mark it done/undone
-
-TEXT EDITING IN CONTENT
-------------------------------
-- Click anywhere in the content area to start editing
-- Type to add text
-- Backspace: delete character before cursor
-- Delete: delete character at cursor
-- Enter: create new line
-- Tab: indent (4 spaces)
-- Ctrl+S: save your changes
-- Esc: cancel editing without saving
-- Ctrl+A: select all text
-- Ctrl+K: delete current line
-
-FORMATTING & FEATURES
-------------------------------
-
-Links & Files - Add an absolute or ~ path (supports spaces and quotes; also works with [alt][~/path/to/file]). Stay in read mode and click the line to open it with your system's default application (PDF, images, audio, archives, etc.).
-
-Code Blocks - wrap with ```:
-```rust
-fn example() {
-    println!("hello!");
-}
-```
-
-KEYBOARD SHORTCUTS
-------------------------------
-Ctrl+S: Save current edit
-Esc: Cancel current edit
-Ctrl+A: Select all text (in editor)
-Ctrl+K: Delete current line (in editor)
-Ctrl+Z: Undo (in editor)
-Ctrl+Y: Redo (in editor)
-Ctrl+F: Global search
-Up/Down/PgUp/PgDn: Scroll content
-Mouse wheel: Scroll content (no edit mode needed!)
-
-OTHER SECTIONS (tabs at top)
-------------------------------
-- PLANNER: Tasks, habits, reminders, goal tracking
-- JOURNAL: Daily journal with calendar date picker
-- FINANCE: Track expenses and income
-- HEALTH: Log meals and calories
-- KANBAN: Organize work in columns
-- FLASHCARDS: Spaced repetition flashcards for memorization
-
-FLASHCARDS (SPACED REPETITION)
---------------------------------
-- Create flashcards with front/back content
-- Uses SM-2 algorithm for optimal review scheduling
-- Rate your recall: 0 (blackout) to 5 (perfect)
-- Import flashcards from CSV or JSON files
-- CSV format: front,back,type,collection (last 2 optional: type=basic/cloze/mc)
-- JSON format: array of card objects
-- Review Mode: Space to show answer, 0-5 keys to rate quality
-- List View: Up/Down to navigate, Enter to review, Double-click to start review
-- Single-click to select/highlight, double-click to enter review mode
-- Press Esc to exit review mode
-- Filters: Click 'Filter' to cycle through:
-  • All - Show all flashcards
-  • New - Never reviewed cards
-  • Due - Cards scheduled for review today
-  • Blackout - Complete failures (ease < 1.3)
-  • Hard - Struggling cards (ease 1.3-1.8)
-  • Medium - Average cards (ease 1.8-2.3)
-  • Easy - Good cards (ease 2.3-2.8)
-  • Perfect - Excellent cards (ease ≥ 2.8)
-  • Mastered - Well-learned cards (5+ reviews, high ease)
-  • Collections - Group related cards (use 'Set Collection' to assign)
-
-TIPS & TRICKS
-------------------------------
-- All changes auto-save when you press **Ctrl+s**
-- Use mouse wheel to scroll and read - NO NEED TO ENTER EDIT MODE!
-- Click Date button in Journal to pick any date with calendar
-- Create multiple notebooks for different purposes
-- Use sections to organize notes by topic
-- Mix text, code, tables, and flow steps on the same page!
-
-CREATING TABLES:
-- Start lines with | to create a table
-- Use --- to create a separator row
-- Example:
-  | Column1 | Column2 |
-  |---------|---------|
-  | Value1  | Value2  |
-
-CREATING FLOW STEPS:
-- Use > to start a step, - for bullet details, 1. for numbered lists.
-- Example:
-  > First step
-  - detail
-  1. next
-
-  Project Flow:
-[Requirements] -> [Design] -> [Development] -> [Testing] -> [Release]
-
-EXAMPLE - Mixed Content
-------------------------------
-Project Status Table:
-
-| Task        | Status      | Owner |
-|-------------|-------------|-------|
-| Design      | Complete    | Ada   |
-| Development | In Progress | Bob   |
-| Testing     | Pending     | Chen  |
-
-Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Tables and flow steps render automatically!"#
-                    .to_string();
-                page.extract_links_and_images();
-            }
-        }
-
-        let default_kanban = vec![
-            KanbanCard {
-                title: "Sketch backlog".to_string(),
-                note: "Status: Planned\nOwner: (assign)\nRoadblocks: None yet\nNext step: Draft 5-7 candidate tasks\nLinks/Refs: --".to_string(),
-                stage: KanbanStage::Todo,
-                matrix: TaskMatrix::Schedule,
-                due_date: None,
-                created_at: Local::now().date_naive(),
-            },
-            KanbanCard {
-                title: "Prioritize top 3".to_string(),
-                note: "Status: In Progress\nOwner: (assign)\nRoadblocks: Waiting on estimates?\nNext step: Rank top 3, mark owners\nLinks/Refs: --".to_string(),
-                stage: KanbanStage::Doing,
-                matrix: TaskMatrix::Do,
-                due_date: None,
-                created_at: Local::now().date_naive(),
-            },
-            KanbanCard {
-                title: "Wrap a win".to_string(),
-                note: "Status: Done (template)\nOwner: (assign)\nRoadblocks: None\nNext step: Demo & announce\nLinks/Refs: --".to_string(),
-                stage: KanbanStage::Done,
-                matrix: TaskMatrix::Delegate,
-                due_date: None,
-                created_at: Local::now().date_naive(),
-            },
-        ];
+        let today = today();
+        let rect = Rect::default();
+        let empty = String::new();
 
         Self {
-            notebooks: vec![default_notebook],
-            current_notebook_idx: 0,
-            current_section_idx: 0,
-            current_page_idx: 0,
+            notebooks: vec![default_notebook()],
+            kanban_cards: default_kanban_cards(today),
+            current_journal_date: today,
+            current_mistake_date: today,
+            calendar_year: Local::now().year(),
+            calendar_month: Local::now().month(),
+            spell_dict: Self::load_spell_dict(),
             hierarchy_level: HierarchyLevel::Notebook,
-            editing_input: String::new(),
             edit_target: EditTarget::None,
             view_mode: ViewMode::Notes,
             planner_view: PlannerView::List,
             kanban_view: KanbanView::Board,
-            tasks: Vec::new(),
-            current_task_idx: 0,
-            journal_entries: Vec::new(),
-            current_journal_date: Local::now().date_naive(),
-            mistake_entries: Vec::new(),
-            current_mistake_date: Local::now().date_naive(),
             journal_view: JournalView::Entry,
-            habits: Vec::new(),
+            card_filter: CardFilter::All,
+            calendar_target: CalendarTarget::Journal,
+            find_mode: FindMode::Content,
+            find_input_focus: true,
+            textarea: TextArea::default(),
+            current_notebook_idx: 0,
+            current_section_idx: 0,
+            current_page_idx: 0,
+            current_task_idx: 0,
             current_habit_idx: 0,
-            finances: Vec::new(),
             current_finance_idx: 0,
-            calories: Vec::new(),
             current_calorie_idx: 0,
-            kanban_cards: default_kanban,
             current_kanban_card_idx: 0,
-            cards: Vec::new(),
             current_card_idx: 0,
             show_card_answer: false,
             card_review_mode: false,
-            card_filter: CardFilter::All,
             card_selection_anchor: None,
+            show_finance_summary: false,
+            finance_summary_scroll: 0,
+            selected_finance_category_idx: 0,
+            show_habits_summary: false,
+            habits_summary_scroll: 0,
+            show_card_import_help: false,
+            card_import_help_scroll: 0,
+            pending_card_import_path: None,
+            content_scroll: 0,
+            textarea_scroll: 0,
+            selection_all: false,
+            editing_cursor_line: 0,
+            editing_cursor_col: 0,
+            editing_input: empty.clone(),
+            find_text: empty.clone(),
+            replace_text: empty.clone(),
+            show_global_search: false,
+            global_search_query: empty.clone(),
+            global_search_selected: 0,
+            show_help_overlay: false,
+            help_search_query: empty.clone(),
+            help_scroll: 0,
+            show_validation_error: false,
+            validation_error_message: empty.clone(),
+            show_success_popup: false,
+            success_message: empty,
+            editing_line_index: 0,
+            inline_edit_mode: false,
+            show_calendar: false,
+            show_spell_check: false,
+            spell_check_selected: 0,
+            spell_check_scroll: 0,
+            tasks: Vec::new(),
+            journal_entries: Vec::new(),
+            mistake_entries: Vec::new(),
+            habits: Vec::new(),
+            finances: Vec::new(),
+            calories: Vec::new(),
+            cards: Vec::new(),
             selected_card_indices: BTreeSet::new(),
+            custom_words: HashSet::new(),
             tree_items: Vec::new(),
             task_items: Vec::new(),
             habit_items: Vec::new(),
@@ -1311,111 +875,72 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             kanban_items: Vec::new(),
             kanban_matrix_items: Vec::new(),
             card_items: Vec::new(),
-            content_edit_area: Rect::default(),
-            add_notebook_btn: Rect::default(),
-            add_section_btn: Rect::default(),
-            add_page_btn: Rect::default(),
-            delete_btn: Rect::default(),
             view_mode_btns: Vec::new(),
-            add_task_btn: Rect::default(),
-            planner_list_btn: Rect::default(),
-            planner_matrix_btn: Rect::default(),
-            edit_task_btn: Rect::default(),
-            delete_task_btn: Rect::default(),
             matrix_items: Vec::new(),
-            matrix_do_btn: Rect::default(),
-            matrix_schedule_btn: Rect::default(),
-            matrix_delegate_btn: Rect::default(),
-            matrix_eliminate_btn: Rect::default(),
-            add_habit_btn: Rect::default(),
-            mark_done_btn: Rect::default(),
-            edit_habit_btn: Rect::default(),
-            delete_habit_btn: Rect::default(),
-            add_fin_btn: Rect::default(),
-            edit_fin_btn: Rect::default(),
-            delete_fin_btn: Rect::default(),
-            summary_btn: Rect::default(),
-            show_finance_summary: false,
-            finance_summary_scroll: 0,
-            selected_finance_category_idx: 0,
-            show_habits_summary: false,
-            habits_summary_scroll: 0,
-            card_import_help_btn: Rect::default(),
-            card_import_edit_btn: Rect::default(),
-            show_card_import_help: false,
-            card_import_help_scroll: 0,
-               card_import_help_text_area: Rect::default(),
-            pending_card_import_path: None,
-            add_cal_btn: Rect::default(),
-            edit_cal_btn: Rect::default(),
-            delete_cal_btn: Rect::default(),
-            add_kanban_btn: Rect::default(),
-            move_left_kanban_btn: Rect::default(),
-            move_right_kanban_btn: Rect::default(),
-            delete_kanban_btn: Rect::default(),
-            kanban_board_btn: Rect::default(),
-            kanban_matrix_btn: Rect::default(),
-            kanban_matrix_do_btn: Rect::default(),
-            kanban_matrix_schedule_btn: Rect::default(),
-            kanban_matrix_delegate_btn: Rect::default(),
-            kanban_matrix_eliminate_btn: Rect::default(),
-            add_card_btn: Rect::default(),
-            review_card_btn: Rect::default(),
-            edit_card_btn: Rect::default(),
-            delete_card_btn: Rect::default(),
-            import_card_btn: Rect::default(),
-            show_answer_btn: Rect::default(),
             quality_btns: Vec::new(),
-            filter_collection_btn: Rect::default(),
-            bulk_delete_btn: Rect::default(),
-            bulk_unassign_btn: Rect::default(),
-            prev_day_btn: Rect::default(),
-            next_day_btn: Rect::default(),
-            date_btn: Rect::default(),
-            today_btn: Rect::default(),
-            mistake_book_btn: Rect::default(),
-            mistake_list_btn: Rect::default(),
-            mistake_log_btn: Rect::default(),
-            search_btn: Rect::default(),
+            calendar_day_rects: Vec::new(),
+            global_search_results: Vec::new(),
             search_result_items: Vec::new(),
             mistake_list_items: Vec::new(),
             mistake_list_dates: Vec::new(),
-            content_scroll: 0,
-            textarea_scroll: 0,
-            selection_all: false,
-            editing_cursor_line: 0,
-            editing_cursor_col: 0,
-            find_text: String::new(),
-            replace_text: String::new(),
-            find_mode: FindMode::Content,
-            find_input_focus: true,
-            show_global_search: false,
-            global_search_query: String::new(),
-            global_search_results: Vec::new(),
-            global_search_selected: 0,
-            show_help_overlay: false,
-            help_search_query: String::new(),
-            help_scroll: 0,
-            show_validation_error: false,
-            validation_error_message: String::new(),
-            show_success_popup: false,
-            success_message: String::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            editing_line_index: 0,
-            inline_edit_mode: false,
-            textarea: TextArea::default(),
-            show_calendar: false,
-            calendar_year: Local::now().year(),
-            calendar_month: Local::now().month(),
-            calendar_day_rects: Vec::new(),
-            calendar_target: CalendarTarget::Journal,
-            spell_dict: Self::load_spell_dict(),
-            show_spell_check: false,
             spell_check_results: Vec::new(),
-            spell_check_selected: 0,
-            spell_check_scroll: 0,
-            custom_words: HashSet::new(),
+            content_edit_area: rect,
+            add_notebook_btn: rect,
+            add_section_btn: rect,
+            add_page_btn: rect,
+            delete_btn: rect,
+            add_task_btn: rect,
+            planner_list_btn: rect,
+            planner_matrix_btn: rect,
+            edit_task_btn: rect,
+            delete_task_btn: rect,
+            matrix_do_btn: rect,
+            matrix_schedule_btn: rect,
+            matrix_delegate_btn: rect,
+            matrix_eliminate_btn: rect,
+            add_habit_btn: rect,
+            mark_done_btn: rect,
+            edit_habit_btn: rect,
+            delete_habit_btn: rect,
+            add_fin_btn: rect,
+            edit_fin_btn: rect,
+            delete_fin_btn: rect,
+            summary_btn: rect,
+            card_import_help_btn: rect,
+            card_import_edit_btn: rect,
+            card_import_help_text_area: rect,
+            add_cal_btn: rect,
+            edit_cal_btn: rect,
+            delete_cal_btn: rect,
+            add_kanban_btn: rect,
+            move_left_kanban_btn: rect,
+            move_right_kanban_btn: rect,
+            delete_kanban_btn: rect,
+            kanban_board_btn: rect,
+            kanban_matrix_btn: rect,
+            kanban_matrix_do_btn: rect,
+            kanban_matrix_schedule_btn: rect,
+            kanban_matrix_delegate_btn: rect,
+            kanban_matrix_eliminate_btn: rect,
+            add_card_btn: rect,
+            review_card_btn: rect,
+            edit_card_btn: rect,
+            delete_card_btn: rect,
+            import_card_btn: rect,
+            show_answer_btn: rect,
+            filter_collection_btn: rect,
+            bulk_delete_btn: rect,
+            bulk_unassign_btn: rect,
+            prev_day_btn: rect,
+            next_day_btn: rect,
+            date_btn: rect,
+            today_btn: rect,
+            mistake_book_btn: rect,
+            mistake_list_btn: rect,
+            mistake_log_btn: rect,
+            search_btn: rect,
         }
     }
 
@@ -1435,7 +960,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
         }
 
         // 3) Bundled fallback (basic list)
-        const EN_WORDS: &str = include_str!("../assets/spell_en_basic.txt");
+        const EN_WORDS: &str = include_str!("assets/spell_en_basic.txt");
         Some(SimpleDictionary::from_wordlist(EN_WORDS))
     }
 
@@ -1448,32 +973,25 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
     }
 
     fn current_section(&self) -> Option<&Section> {
-        self.current_notebook()
-            .and_then(|nb| nb.sections.get(self.current_section_idx))
+        self.current_notebook().and_then(|nb| nb.sections.get(self.current_section_idx))
     }
 
     fn current_section_mut(&mut self) -> Option<&mut Section> {
         let idx = self.current_section_idx;
-        self.current_notebook_mut()
-            .and_then(|nb| nb.sections.get_mut(idx))
+        self.current_notebook_mut().and_then(|nb| nb.sections.get_mut(idx))
     }
 
     fn current_page(&self) -> Option<&Page> {
-        self.current_section()
-            .and_then(|sec| sec.pages.get(self.current_page_idx))
+        self.current_section().and_then(|sec| sec.pages.get(self.current_page_idx))
     }
 
     fn current_page_mut(&mut self) -> Option<&mut Page> {
         let idx = self.current_page_idx;
-        self.current_section_mut()
-            .and_then(|sec| sec.pages.get_mut(idx))
+        self.current_section_mut().and_then(|sec| sec.pages.get_mut(idx))
     }
 
     fn add_notebook(&mut self) {
-        self.notebooks.push(Notebook::new(format!(
-            "Notebook {}",
-            self.notebooks.len() + 1
-        )));
+        self.notebooks.push(Notebook::new(format!("Notebook {}", self.notebooks.len() + 1)));
         self.current_notebook_idx = self.notebooks.len() - 1;
         self.current_section_idx = 0;
         self.current_page_idx = 0;
@@ -1481,9 +999,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
 
     fn add_section(&mut self) {
         if let Some(notebook) = self.current_notebook_mut() {
-            notebook
-                .sections
-                .push(Section::new("New Section".to_string()));
+            notebook.sections.push(Section::new("New Section".to_string()));
             self.current_section_idx = notebook.sections.len() - 1;
             self.current_page_idx = 0;
         }
@@ -1501,9 +1017,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             HierarchyLevel::Notebook => {
                 if self.notebooks.len() > 1 {
                     self.notebooks.remove(self.current_notebook_idx);
-                    self.current_notebook_idx = self
-                        .current_notebook_idx
-                        .min(self.notebooks.len().saturating_sub(1));
+                    self.current_notebook_idx = self.current_notebook_idx.min(self.notebooks.len().saturating_sub(1));
                     self.current_section_idx = 0;
                     self.current_page_idx = 0;
                 }
@@ -1513,8 +1027,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
                 if let Some(notebook) = self.current_notebook_mut() {
                     if notebook.sections.len() > 0 {
                         notebook.sections.remove(sec_idx);
-                        self.current_section_idx =
-                            sec_idx.min(notebook.sections.len().saturating_sub(1));
+                        self.current_section_idx = sec_idx.min(notebook.sections.len().saturating_sub(1));
                         self.current_page_idx = 0;
                     }
                 }
@@ -1538,16 +1051,10 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
         self.undo_stack.clear();
         self.redo_stack.clear();
         let line_count = self.editing_input.lines().count().saturating_sub(1);
-        let last_len = self
-            .editing_input
-            .lines()
-            .last()
-            .map(|l| l.len())
-            .unwrap_or(0);
+        let last_len = self.editing_input.lines().last().map(|l| l.len()).unwrap_or(0);
         self.editing_cursor_line = line_count;
         self.editing_cursor_col = last_len;
-        self.textarea
-            .move_cursor(CursorMove::Jump(line_count as u16, last_len as u16));
+        self.textarea.move_cursor(CursorMove::Jump(line_count as u16, last_len as u16));
         self.selection_all = false;
     }
 
@@ -1603,22 +1110,14 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             EditTarget::PageTitle => {
                 if let Some(page) = self.current_page_mut() {
                     // Validate title length (max 200 characters)
-                    page.title = if input.len() <= 200 {
-                        input
-                    } else {
-                        input.chars().take(200).collect()
-                    };
+                    page.title = if input.len() <= 200 { input } else { input.chars().take(200).collect() };
                     page.modified_at = Local::now().date_naive();
                 }
             }
             EditTarget::PageContent => {
                 if let Some(page) = self.current_page_mut() {
                     // Validate content length (max 100,000 characters)
-                    page.content = if input.len() <= 100_000 {
-                        input
-                    } else {
-                        input.chars().take(100_000).collect()
-                    };
+                    page.content = if input.len() <= 100_000 { input } else { input.chars().take(100_000).collect() };
                     page.modified_at = Local::now().date_naive();
                     page.extract_links_and_images();
                     page.update_title_from_content();
@@ -1659,18 +1158,10 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             }
             EditTarget::JournalEntry => {
                 // Validate journal content length (max 50,000 characters)
-                let validated_content = if input.len() <= 50_000 {
-                    input.clone()
-                } else {
-                    input.chars().take(50_000).collect()
-                };
-                
+                let validated_content = if input.len() <= 50_000 { input.clone() } else { input.chars().take(50_000).collect() };
+
                 // Find or create journal entry for current date
-                if let Some(entry) = self
-                    .journal_entries
-                    .iter_mut()
-                    .find(|e| e.date == self.current_journal_date)
-                {
+                if let Some(entry) = self.journal_entries.iter_mut().find(|e| e.date == self.current_journal_date) {
                     entry.content = validated_content;
                 } else {
                     let mut entry = JournalEntry::new(self.current_journal_date);
@@ -1680,17 +1171,9 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             }
             EditTarget::MistakeEntry => {
                 // Validate mistake entry content length (max 50,000 characters)
-                let validated_content = if input.len() <= 50_000 {
-                    input.clone()
-                } else {
-                    input.chars().take(50_000).collect()
-                };
+                let validated_content = if input.len() <= 50_000 { input.clone() } else { input.chars().take(50_000).collect() };
 
-                if let Some(entry) = self
-                    .mistake_entries
-                    .iter_mut()
-                    .find(|e| e.date == self.current_mistake_date)
-                {
+                if let Some(entry) = self.mistake_entries.iter_mut().find(|e| e.date == self.current_mistake_date) {
                     entry.content = validated_content;
                 } else {
                     let mut entry = MistakeEntry::new(self.current_mistake_date);
@@ -1698,20 +1181,18 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
                     self.mistake_entries.push(entry);
                 }
             }
-            EditTarget::HabitNew => {
-                match parse_and_validate_habit(&input, None, self.current_journal_date) {
-                    Ok(habit) => {
-                        self.habits.push(habit);
-                        self.current_habit_idx = self.habits.len().saturating_sub(1);
-                        let _ = complete_edit(self);
-                        return;
-                    }
-                    Err(err) => {
-                        handle_validation_error(self, &err, "Habit");
-                        return;
-                    }
+            EditTarget::HabitNew => match parse_and_validate_habit(&input, None, self.current_journal_date) {
+                Ok(habit) => {
+                    self.habits.push(habit);
+                    self.current_habit_idx = self.habits.len().saturating_sub(1);
+                    let _ = complete_edit(self);
+                    return;
                 }
-            }
+                Err(err) => {
+                    handle_validation_error(self, &err, "Habit");
+                    return;
+                }
+            },
             EditTarget::Habit => {
                 if let Some(existing) = self.habits.get(self.current_habit_idx).cloned() {
                     match parse_and_validate_habit(&input, Some(&existing), existing.start_date) {
@@ -1730,18 +1211,14 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
                 }
             }
             EditTarget::FinanceNew => {
-                if let Some(entry) =
-                    parse_finance_editor_content(&input, None, self.current_journal_date)
-                {
+                if let Some(entry) = parse_finance_editor_content(&input, None, self.current_journal_date) {
                     self.finances.push(entry);
                     self.current_finance_idx = self.finances.len().saturating_sub(1);
                 }
             }
             EditTarget::Finance => {
                 if let Some(existing) = self.finances.get(self.current_finance_idx).cloned() {
-                    if let Some(updated) =
-                        parse_finance_editor_content(&input, Some(&existing), existing.date)
-                    {
+                    if let Some(updated) = parse_finance_editor_content(&input, Some(&existing), existing.date) {
                         if let Some(slot) = self.finances.get_mut(self.current_finance_idx) {
                             *slot = updated;
                         }
@@ -1749,18 +1226,14 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
                 }
             }
             EditTarget::CaloriesNew => {
-                if let Some(entry) =
-                    parse_calorie_editor_content(&input, None, self.current_journal_date)
-                {
+                if let Some(entry) = parse_calorie_editor_content(&input, None, self.current_journal_date) {
                     self.calories.push(entry);
                     self.current_calorie_idx = self.calories.len().saturating_sub(1);
                 }
             }
             EditTarget::Calories => {
                 if let Some(existing) = self.calories.get(self.current_calorie_idx).cloned() {
-                    if let Some(updated) =
-                        parse_calorie_editor_content(&input, Some(&existing), existing.date)
-                    {
+                    if let Some(updated) = parse_calorie_editor_content(&input, Some(&existing), existing.date) {
                         if let Some(slot) = self.calories.get_mut(self.current_calorie_idx) {
                             *slot = updated;
                         }
@@ -1776,9 +1249,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             EditTarget::KanbanEdit => {
                 if let Some(existing) = self.kanban_cards.get(self.current_kanban_card_idx).cloned() {
                     if let Some(updated) = parse_kanban_editor_content(&input, Some(&existing)) {
-                        if let Some(slot) =
-                            self.kanban_cards.get_mut(self.current_kanban_card_idx)
-                        {
+                        if let Some(slot) = self.kanban_cards.get_mut(self.current_kanban_card_idx) {
                             *slot = updated;
                         }
                     }
@@ -1832,13 +1303,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
     }
 
     fn filtered_card_indices(&self) -> Vec<usize> {
-        self
-            .cards
-            .iter()
-            .enumerate()
-            .filter(|(_, card)| matches_filter(self, card))
-            .map(|(idx, _)| idx)
-            .collect()
+        self.cards.iter().enumerate().filter(|(_, card)| matches_filter(self, card)).map(|(idx, _)| idx).collect()
     }
 
     fn update_card_selection(&mut self, anchor: usize, current: usize) {
@@ -1858,38 +1323,17 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
 
     fn validate_indices(&mut self) {
         // Validate and clamp all indices to prevent out-of-bounds access
-        if self.current_notebook_idx >= self.notebooks.len() {
-            self.current_notebook_idx = 0;
-        }
-        if self.current_section_idx
-            >= self
-                .current_notebook()
-                .map(|n| n.sections.len())
-                .unwrap_or(0)
-        {
-            self.current_section_idx = 0;
-        }
-        if self.current_page_idx >= self.current_section().map(|s| s.pages.len()).unwrap_or(0) {
-            self.current_page_idx = 0;
-        }
-        if self.current_task_idx >= self.tasks.len() {
-            self.current_task_idx = 0;
-        }
-        if self.current_habit_idx >= self.habits.len() {
-            self.current_habit_idx = 0;
-        }
-        if self.current_finance_idx >= self.finances.len() {
-            self.current_finance_idx = 0;
-        }
-        if self.current_calorie_idx >= self.calories.len() {
-            self.current_calorie_idx = 0;
-        }
-        if self.current_kanban_card_idx >= self.kanban_cards.len() {
-            self.current_kanban_card_idx = 0;
-        }
-        if self.current_card_idx >= self.cards.len() {
-            self.current_card_idx = 0;
-        }
+        let section_len = self.current_notebook().map(|n| n.sections.len()).unwrap_or(0);
+        let page_len = self.current_section().map(|s| s.pages.len()).unwrap_or(0);
+        clamp_index(&mut self.current_notebook_idx, self.notebooks.len());
+        clamp_index(&mut self.current_section_idx, section_len);
+        clamp_index(&mut self.current_page_idx, page_len);
+        clamp_index(&mut self.current_task_idx, self.tasks.len());
+        clamp_index(&mut self.current_habit_idx, self.habits.len());
+        clamp_index(&mut self.current_finance_idx, self.finances.len());
+        clamp_index(&mut self.current_calorie_idx, self.calories.len());
+        clamp_index(&mut self.current_kanban_card_idx, self.kanban_cards.len());
+        clamp_index(&mut self.current_card_idx, self.cards.len());
         self.clear_card_selection();
     }
 
@@ -1929,12 +1373,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
                     if !self.custom_words.contains(&word_lower) {
                         if !dict.check_word(&word_lower, &self.custom_words) {
                             let suggestions = dict.suggest(&word_lower, &self.custom_words, 5);
-                            self.spell_check_results.push(SpellCheckResult {
-                                word: word.to_string(),
-                                suggestions,
-                                line_number: line_idx + 1,
-                                column: col,
-                            });
+                            self.spell_check_results.push(SpellCheckResult { word: word.to_string(), suggestions, line_number: line_idx + 1, column: col });
                         }
                     }
                 }
@@ -1957,8 +1396,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
         let lines: Vec<String> = new_text.lines().map(|s| s.to_string()).collect();
         let (row, _col) = self.textarea.cursor();
         self.textarea = TextArea::new(lines);
-        self.textarea
-            .move_cursor(CursorMove::Jump(row as u16, 0));
+        self.textarea.move_cursor(CursorMove::Jump(row as u16, 0));
         self.editing_input = self.textarea.lines().join("\n");
     }
 
@@ -1987,7 +1425,9 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             }
             SearchTarget::Habit { idx, date } => {
                 self.current_habit_idx = idx.min(self.habits.len().saturating_sub(1));
-                if let Some(d) = date { self.current_journal_date = d; }
+                if let Some(d) = date {
+                    self.current_journal_date = d;
+                }
                 self.view_mode = ViewMode::Habits;
             }
             SearchTarget::Finance { idx, date } => {
@@ -2037,12 +1477,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
                     let detail = format!("{}/{}", nb.title, sec.title);
                     let score = self.fuzzy_score(&page.title, q) + self.fuzzy_score(&detail, q);
                     if score > 350 {
-                        hits.push(SearchHit {
-                            title,
-                            detail,
-                            target: SearchTarget::Note { notebook_idx: nb_idx, section_idx: sec_idx, page_idx: pg_idx },
-                            score,
-                        });
+                        hits.push(SearchHit { title, detail, target: SearchTarget::Note { notebook_idx: nb_idx, section_idx: sec_idx, page_idx: pg_idx }, score });
                     }
                 }
             }
@@ -2050,20 +1485,10 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
 
         // Tasks
         for (idx, task) in self.tasks.iter().enumerate() {
-            let detail = task
-                .description
-                .lines()
-                .next()
-                .unwrap_or("")
-                .to_string();
+            let detail = task.description.lines().next().unwrap_or("").to_string();
             let score = self.fuzzy_score(&task.title, q) + self.fuzzy_score(&detail, q);
             if score > 350 {
-                hits.push(SearchHit {
-                    title: format!("Task: {}", task.title),
-                    detail,
-                    target: SearchTarget::Task { idx },
-                    score,
-                });
+                hits.push(SearchHit { title: format!("Task: {}", task.title), detail, target: SearchTarget::Task { idx }, score });
             }
         }
 
@@ -2072,27 +1497,16 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             let first_line = entry.content.lines().next().unwrap_or("");
             let score = self.fuzzy_score(&entry.date.to_string(), q) + self.fuzzy_score(first_line, q);
             if score > 300 {
-                hits.push(SearchHit {
-                    title: format!("Journal {}", entry.date),
-                    detail: first_line.to_string(),
-                    target: SearchTarget::Journal { date: entry.date },
-                    score,
-                });
+                hits.push(SearchHit { title: format!("Journal {}", entry.date), detail: first_line.to_string(), target: SearchTarget::Journal { date: entry.date }, score });
             }
         }
 
         // Mistake book entries
         for entry in self.mistake_entries.iter() {
             let first_line = entry.content.lines().next().unwrap_or("");
-            let score = self.fuzzy_score(&entry.date.to_string(), q)
-                + self.fuzzy_score(&entry.content, q);
+            let score = self.fuzzy_score(&entry.date.to_string(), q) + self.fuzzy_score(&entry.content, q);
             if score > 300 {
-                hits.push(SearchHit {
-                    title: format!("Mistake Book {}", entry.date),
-                    detail: first_line.to_string(),
-                    target: SearchTarget::MistakeBook { date: entry.date },
-                    score,
-                });
+                hits.push(SearchHit { title: format!("Mistake Book {}", entry.date), detail: first_line.to_string(), target: SearchTarget::MistakeBook { date: entry.date }, score });
             }
         }
 
@@ -2100,12 +1514,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
         for (idx, habit) in self.habits.iter().enumerate() {
             let score = self.fuzzy_score(&habit.name, q);
             if score > 350 {
-                hits.push(SearchHit {
-                    title: format!("Habit: {}", habit.name),
-                    detail: format!("{} • {}", habit_status_label(habit.status), recurrence_label(habit.frequency)),
-                    target: SearchTarget::Habit { idx, date: None },
-                    score,
-                });
+                hits.push(SearchHit { title: format!("Habit: {}", habit.name), detail: format!("{} • {}", habit_status_label(habit.status), recurrence_label(habit.frequency)), target: SearchTarget::Habit { idx, date: None }, score });
             }
         }
 
@@ -2115,12 +1524,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             let detail = fin.note.lines().next().unwrap_or("").to_string();
             let score = self.fuzzy_score(&title, q) + self.fuzzy_score(&detail, q);
             if score > 300 {
-                hits.push(SearchHit {
-                    title,
-                    detail,
-                    target: SearchTarget::Finance { idx, date: fin.date },
-                    score,
-                });
+                hits.push(SearchHit { title, detail, target: SearchTarget::Finance { idx, date: fin.date }, score });
             }
         }
 
@@ -2130,12 +1534,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
             let detail = cal.note.lines().next().unwrap_or("").to_string();
             let score = self.fuzzy_score(&title, q) + self.fuzzy_score(&detail, q);
             if score > 300 {
-                hits.push(SearchHit {
-                    title,
-                    detail,
-                    target: SearchTarget::Calorie { idx, date: cal.date },
-                    score,
-                });
+                hits.push(SearchHit { title, detail, target: SearchTarget::Calorie { idx, date: cal.date }, score });
             }
         }
 
@@ -2143,12 +1542,7 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
         for (idx, card) in self.kanban_cards.iter().enumerate() {
             let score = self.fuzzy_score(&card.title, q) + self.fuzzy_score(&card.note, q);
             if score > 300 {
-                hits.push(SearchHit {
-                    title: format!("Kanban: {}", card.title),
-                    detail: card.note.lines().next().unwrap_or("").to_string(),
-                    target: SearchTarget::Kanban { idx },
-                    score,
-                });
+                hits.push(SearchHit { title: format!("Kanban: {}", card.title), detail: card.note.lines().next().unwrap_or("").to_string(), target: SearchTarget::Kanban { idx }, score });
             }
         }
 
@@ -2156,22 +1550,12 @@ Happy note-taking! Start by clicking a page to edit, use mouse wheel to read. Ta
         for (idx, card) in self.cards.iter().enumerate() {
             let score = self.fuzzy_score(&card.front, q) + self.fuzzy_score(&card.back, q);
             if score > 300 {
-                hits.push(SearchHit {
-                    title: format!("Flashcard: {}", card.front.chars().take(50).collect::<String>()),
-                    detail: card.back.chars().take(50).collect::<String>(),
-                    target: SearchTarget::Card { idx },
-                    score,
-                });
+                hits.push(SearchHit { title: format!("Flashcard: {}", card.front.chars().take(50).collect::<String>()), detail: card.back.chars().take(50).collect::<String>(), target: SearchTarget::Card { idx }, score });
             }
         }
 
         if q_lower.contains("help") || q_lower.contains("shortcut") || q_lower.contains("tips") || q.contains('?') {
-            hits.push(SearchHit {
-                title: "Help & Shortcuts".to_string(),
-                detail: "Open the quick tips panel (press ?).".to_string(),
-                target: SearchTarget::Help,
-                score: self.fuzzy_score("help shortcuts", q) + 800,
-            });
+            hits.push(SearchHit { title: "Help & Shortcuts".to_string(), detail: "Open the quick tips panel (press ?).".to_string(), target: SearchTarget::Help, score: self.fuzzy_score("help shortcuts", q) + 800 });
         }
 
         hits.sort_by(|a, b| b.score.cmp(&a.score));
@@ -2189,9 +1573,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> 
     loop {
         terminal.draw(|frame| draw(frame, &mut app))?;
 
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or(Duration::from_secs(0));
+        let timeout = tick_rate.checked_sub(last_tick.elapsed()).unwrap_or(Duration::from_secs(0));
 
         if event::poll(timeout)? {
             match event::read()? {
@@ -2540,12 +1922,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             KeyCode::Enter if !app.card_review_mode && !app.cards.is_empty() => {
                 // Ensure current selection is within filter
                 if !matches_filter(app, &app.cards[app.current_card_idx]) {
-                    if let Some((first_idx, _)) = app
-                        .cards
-                        .iter()
-                        .enumerate()
-                        .find(|(_, c)| matches_filter(app, c))
-                    {
+                    if let Some((first_idx, _)) = app.cards.iter().enumerate().find(|(_, c)| matches_filter(app, c)) {
                         app.current_card_idx = first_idx;
                     }
                 }
@@ -2585,34 +1962,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             KeyCode::Left => {
                 // Get unique categories
-                let categories: Vec<String> = app
-                    .finances
-                    .iter()
-                    .map(|e| e.category.clone())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
-                
+                let categories: Vec<String> = app.finances.iter().map(|e| e.category.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+
                 if !categories.is_empty() {
-                    app.selected_finance_category_idx = if app.selected_finance_category_idx > 0 {
-                        app.selected_finance_category_idx - 1
-                    } else {
-                        categories.len() - 1
-                    };
+                    app.selected_finance_category_idx = if app.selected_finance_category_idx > 0 { app.selected_finance_category_idx - 1 } else { categories.len() - 1 };
                     app.finance_summary_scroll = 0; // Reset scroll when changing category
                 }
                 return Ok(false);
             }
             KeyCode::Right => {
                 // Get unique categories
-                let categories: Vec<String> = app
-                    .finances
-                    .iter()
-                    .map(|e| e.category.clone())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
-                
+                let categories: Vec<String> = app.finances.iter().map(|e| e.category.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+
                 if !categories.is_empty() {
                     app.selected_finance_category_idx = (app.selected_finance_category_idx + 1) % categories.len();
                     app.finance_summary_scroll = 0; // Reset scroll when changing category
@@ -2657,33 +2018,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 app.planner_view = PlannerView::Matrix;
                 return Ok(false);
             }
-            KeyCode::Char('1') if matches!(app.planner_view, PlannerView::Matrix) => {
-                if let Some(task) = app.tasks.get_mut(app.current_task_idx) {
-                    task.matrix = TaskMatrix::Do;
-                    let _ = save_app_data(app);
+            code if matches!(app.planner_view, PlannerView::Matrix) => {
+                if let Some(matrix) = matrix_key(code) {
+                    set_task_matrix(app, matrix);
+                    return Ok(false);
                 }
-                return Ok(false);
-            }
-            KeyCode::Char('2') if matches!(app.planner_view, PlannerView::Matrix) => {
-                if let Some(task) = app.tasks.get_mut(app.current_task_idx) {
-                    task.matrix = TaskMatrix::Schedule;
-                    let _ = save_app_data(app);
-                }
-                return Ok(false);
-            }
-            KeyCode::Char('3') if matches!(app.planner_view, PlannerView::Matrix) => {
-                if let Some(task) = app.tasks.get_mut(app.current_task_idx) {
-                    task.matrix = TaskMatrix::Delegate;
-                    let _ = save_app_data(app);
-                }
-                return Ok(false);
-            }
-            KeyCode::Char('4') if matches!(app.planner_view, PlannerView::Matrix) => {
-                if let Some(task) = app.tasks.get_mut(app.current_task_idx) {
-                    task.matrix = TaskMatrix::Eliminate;
-                    let _ = save_app_data(app);
-                }
-                return Ok(false);
             }
             _ => {}
         }
@@ -2700,33 +2039,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 app.kanban_view = KanbanView::Matrix;
                 return Ok(false);
             }
-            KeyCode::Char('1') if matches!(app.kanban_view, KanbanView::Matrix) => {
-                if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
-                    card.matrix = TaskMatrix::Do;
-                    let _ = save_app_data(app);
+            code if matches!(app.kanban_view, KanbanView::Matrix) => {
+                if let Some(matrix) = matrix_key(code) {
+                    set_kanban_matrix(app, matrix);
+                    return Ok(false);
                 }
-                return Ok(false);
-            }
-            KeyCode::Char('2') if matches!(app.kanban_view, KanbanView::Matrix) => {
-                if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
-                    card.matrix = TaskMatrix::Schedule;
-                    let _ = save_app_data(app);
-                }
-                return Ok(false);
-            }
-            KeyCode::Char('3') if matches!(app.kanban_view, KanbanView::Matrix) => {
-                if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
-                    card.matrix = TaskMatrix::Delegate;
-                    let _ = save_app_data(app);
-                }
-                return Ok(false);
-            }
-            KeyCode::Char('4') if matches!(app.kanban_view, KanbanView::Matrix) => {
-                if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
-                    card.matrix = TaskMatrix::Eliminate;
-                    let _ = save_app_data(app);
-                }
-                return Ok(false);
             }
             _ => {}
         }
@@ -2760,15 +2077,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 if dates.is_empty() {
                     return Ok(false);
                 }
-                let current_idx = dates
-                    .iter()
-                    .position(|d| *d == app.current_mistake_date)
-                    .unwrap_or(0);
-                let next_idx = if current_idx > 0 {
-                    current_idx - 1
-                } else {
-                    0
-                };
+                let current_idx = dates.iter().position(|d| *d == app.current_mistake_date).unwrap_or(0);
+                let next_idx = if current_idx > 0 { current_idx - 1 } else { 0 };
                 app.current_mistake_date = dates[next_idx];
                 return Ok(false);
             }
@@ -2777,10 +2087,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 if dates.is_empty() {
                     return Ok(false);
                 }
-                let current_idx = dates
-                    .iter()
-                    .position(|d| *d == app.current_mistake_date)
-                    .unwrap_or(0);
+                let current_idx = dates.iter().position(|d| *d == app.current_mistake_date).unwrap_or(0);
                 let next_idx = (current_idx + 1).min(dates.len().saturating_sub(1));
                 app.current_mistake_date = dates[next_idx];
                 return Ok(false);
@@ -2792,22 +2099,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                 return Ok(false);
             }
             KeyCode::Left if matches!(app.journal_view, JournalView::MistakeLog) => {
-                app.current_mistake_date = app
-                    .current_mistake_date
-                    .pred_opt()
-                    .unwrap_or(app.current_mistake_date);
+                app.current_mistake_date = app.current_mistake_date.pred_opt().unwrap_or(app.current_mistake_date);
                 return Ok(false);
             }
             KeyCode::Right if matches!(app.journal_view, JournalView::MistakeLog) => {
-                app.current_mistake_date = app
-                    .current_mistake_date
-                    .succ_opt()
-                    .unwrap_or(app.current_mistake_date);
+                app.current_mistake_date = app.current_mistake_date.succ_opt().unwrap_or(app.current_mistake_date);
                 return Ok(false);
             }
-            KeyCode::Char('t') | KeyCode::Char('T')
-                if matches!(app.journal_view, JournalView::MistakeLog) =>
-            {
+            KeyCode::Char('t') | KeyCode::Char('T') if matches!(app.journal_view, JournalView::MistakeLog) => {
                 app.current_mistake_date = Local::now().date_naive();
                 return Ok(false);
             }
@@ -2887,10 +2186,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     }
 
     // Ctrl+S: Save current editing content
-    if key.code == KeyCode::Char('s')
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-        && app.is_editing()
-    {
+    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) && app.is_editing() {
         // For inline edits, sync textarea first then save
         if app.inline_edit_mode {
             app.editing_input = app.textarea.lines().join("\n");
@@ -3029,11 +2325,11 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             },
             ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
             alt: key.modifiers.contains(KeyModifiers::ALT),
+            shift: key.modifiers.contains(KeyModifiers::SHIFT),
         };
         app.selection_all = false;
         // Push current state to undo stack before a mutating key
-        let mutates = matches!(input.key, Key::Char(_)|Key::Enter|Key::Backspace|Key::Delete|Key::Tab)
-            || (matches!(input.key, Key::Null) && input.ctrl);
+        let mutates = matches!(input.key, Key::Char(_) | Key::Enter | Key::Backspace | Key::Delete | Key::Tab) || (matches!(input.key, Key::Null) && input.ctrl);
         if mutates {
             let current = app.textarea.lines().join("\n");
             app.undo_stack.push(current);
@@ -3044,7 +2340,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         let (row, col) = app.textarea.cursor();
         app.editing_cursor_line = row;
         app.editing_cursor_col = col;
-        
+
         // Update textarea scroll position to keep cursor visible
         let visible_height: usize = 10; // approximate typical editing area height
         if row >= (app.textarea_scroll as usize).saturating_add(visible_height) {
@@ -3052,7 +2348,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         } else if row < app.textarea_scroll as usize {
             app.textarea_scroll = row as u16;
         }
-        
+
         return Ok(false);
     }
 
@@ -3099,9 +2395,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             if app.show_calendar {
                 for (day, rect) in app.calendar_day_rects.clone() {
                     if inside_rect(mouse, rect) {
-                        if let Some(date) =
-                            NaiveDate::from_ymd_opt(app.calendar_year, app.calendar_month, day)
-                        {
+                        if let Some(date) = NaiveDate::from_ymd_opt(app.calendar_year, app.calendar_month, day) {
                             match app.calendar_target {
                                 CalendarTarget::Journal => app.current_journal_date = date,
                                 CalendarTarget::MistakeBook => app.current_mistake_date = date,
@@ -3116,11 +2410,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
 
             if app.show_global_search {
                 if let Some(idx) = find_clicked_item(mouse, &app.search_result_items.clone()) {
-                    app.global_search_selected =
-                        idx.min(app.global_search_results.len().saturating_sub(1));
-                    if let Some(hit) =
-                        app.global_search_results.get(app.global_search_selected).cloned()
-                    {
+                    app.global_search_selected = idx.min(app.global_search_results.len().saturating_sub(1));
+                    if let Some(hit) = app.global_search_results.get(app.global_search_selected).cloned() {
                         app.navigate_search_target(hit.target);
                         app.show_global_search = false;
                     }
@@ -3174,13 +2465,11 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             ViewMode::Kanban => handle_kanban_mouse_right(app, mouse),
             _ => {}
         },
-        MouseEventKind::Down(MouseButton::Middle) => {
-            match app.view_mode {
-                ViewMode::Notes => handle_notes_mouse_middle(app, mouse),
-                ViewMode::Planner => handle_planner_mouse_middle(app, mouse),
-                _ => {}
-            }
-        }
+        MouseEventKind::Down(MouseButton::Middle) => match app.view_mode {
+            ViewMode::Notes => handle_notes_mouse_middle(app, mouse),
+            ViewMode::Planner => handle_planner_mouse_middle(app, mouse),
+            _ => {}
+        },
         MouseEventKind::ScrollUp => {
             // Scroll up in content when not editing
             if !app.is_editing() && matches!(app.view_mode, ViewMode::Notes) {
@@ -3206,7 +2495,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
 }
 
 fn handle_notes_mouse_left(app: &mut App, mouse: MouseEvent) {
-    // Check tree items - single click to select
     for (level, nb_idx, sec_idx, pg_idx, rect) in app.tree_items.clone() {
         if inside_rect(mouse, rect) {
             app.current_notebook_idx = nb_idx;
@@ -3216,8 +2504,6 @@ fn handle_notes_mouse_left(app: &mut App, mouse: MouseEvent) {
             return;
         }
     }
-
-    // Check buttons
     if inside_rect(mouse, app.add_notebook_btn) {
         app.add_notebook();
         return;
@@ -3234,89 +2520,56 @@ fn handle_notes_mouse_left(app: &mut App, mouse: MouseEvent) {
         app.delete_current();
         return;
     }
-
-    // Check content area
     if inside_rect(mouse, app.content_edit_area) {
-        if !app.is_editing() {
-            let rel_y = mouse.row.saturating_sub(app.content_edit_area.y + 1);
-            let content = app
-                .current_page()
-                .map(|p| p.content.clone())
-                .unwrap_or_default();
-            let lines: Vec<&str> = content.lines().collect();
-            let target_idx = app.content_scroll as usize + rel_y as usize;
-            let mut debug_lines = Vec::new();
-
-            if let Some(line) = lines.get(target_idx) {
-                debug_lines.push(format!("clicked line: {}", line));
-                if let Some(path) = extract_path(line) {
-                    debug_lines.push(format!("found path token: {}", path));
-                    if let Some(resolved) = resolve_image_path(&path) {
-                        debug_lines.push(format!("resolved path: {}", resolved.display()));
-                        let _ = open::that(&resolved).map_err(|e| {
-                            debug_lines.push(format!("open error: {}", e));
-                        });
-                        let _ = std::fs::write("/tmp/mynotes_image_debug.log", debug_lines.join("\n"));
-                        return;
-                    } else {
-                        debug_lines.push("resolve_image_path returned None".to_string());
-                    }
-                } else {
-                    debug_lines.push("extract_path returned None".to_string());
-                }
-            } else {
-                debug_lines.push(format!("line index out of bounds: {} of {}", target_idx, lines.len()));
-            }
-
-            let _ = std::fs::write("/tmp/mynotes_image_debug.log", debug_lines.join("\n"));
-        }
-
         let rel_y = mouse.row.saturating_sub(app.content_edit_area.y + 1);
         let rel_x = mouse.column.saturating_sub(app.content_edit_area.x + 1);
-
-        // Click inside content starts a full-page text editor, and clicking while editing moves the caret
+        if !app.is_editing() {
+            let content = app.current_page().map(|p| p.content.clone()).unwrap_or_default();
+            let target_idx = app.content_scroll as usize + rel_y as usize;
+            if let Some(line) = content.lines().nth(target_idx) {
+                if let Some(path) = extract_path(line) {
+                    if let Some(resolved) = resolve_image_path(&path) {
+                        let _ = open::that(&resolved);
+                        return;
+                    }
+                }
+            }
+        }
         if matches!(app.edit_target, EditTarget::PageContent) {
-            app.textarea
-                .move_cursor(CursorMove::Jump(rel_y as u16, rel_x as u16));
+            app.textarea.move_cursor(CursorMove::Jump(rel_y, rel_x));
         } else if matches!(app.hierarchy_level, HierarchyLevel::Page) {
-            let content = app
-                .current_page()
-                .map(|p| p.content.clone())
-                .unwrap_or_default();
+            let content = app.current_page().map(|p| p.content.clone()).unwrap_or_default();
             start_editing(app, EditTarget::PageContent, content);
             app.inline_edit_mode = false;
-            app.textarea
-                .move_cursor(CursorMove::Jump(rel_y as u16, rel_x as u16));
+            app.textarea.move_cursor(CursorMove::Jump(rel_y, rel_x));
         } else {
-            // In Section/Notebook view, do not enter edit mode on content click
             return;
         }
         let (row, col) = app.textarea.cursor();
         app.editing_cursor_line = row;
         app.editing_cursor_col = col;
-        return;
     }
 }
 
-// Helper function to handle mouse clicks in textarea editors across all views
 fn handle_textarea_mouse_click(app: &mut App, mouse: MouseEvent) {
     if inside_rect(mouse, app.content_edit_area) && app.is_editing() {
         let rel_y = mouse.row.saturating_sub(app.content_edit_area.y + 1);
         let rel_x = mouse.column.saturating_sub(app.content_edit_area.x + 1);
-        
-        app.textarea
-            .move_cursor(CursorMove::Jump(rel_y as u16, rel_x as u16));
-        
+        app.textarea.move_cursor(CursorMove::Jump(rel_y, rel_x));
         let (row, col) = app.textarea.cursor();
         app.editing_cursor_line = row;
         app.editing_cursor_col = col;
     }
 }
 
-fn handle_planner_mouse_left(app: &mut App, mouse: MouseEvent) {
-    // Handle textarea mouse clicks for editing
-    handle_textarea_mouse_click(app, mouse);
+fn set_task_matrix(app: &mut App, m: TaskMatrix) {
+    if mutate_current(&mut app.tasks, app.current_task_idx, |task| task.matrix = m) {
+        save(app);
+    }
+}
 
+fn handle_planner_mouse_left(app: &mut App, mouse: MouseEvent) {
+    handle_textarea_mouse_click(app, mouse);
     if inside_rect(mouse, app.planner_list_btn) {
         app.planner_view = PlannerView::List;
         return;
@@ -3325,148 +2578,88 @@ fn handle_planner_mouse_left(app: &mut App, mouse: MouseEvent) {
         app.planner_view = PlannerView::Matrix;
         return;
     }
-
     if matches!(app.planner_view, PlannerView::Matrix) {
-        if let Some(idx) = find_clicked_item(mouse, &app.matrix_items.clone()) {
-            app.current_task_idx = idx;
+        if select_clicked(mouse, &app.matrix_items, &mut app.current_task_idx) {
             return;
         }
-        if inside_rect(mouse, app.matrix_do_btn) {
-            if let Some(task) = app.tasks.get_mut(app.current_task_idx) {
-                task.matrix = TaskMatrix::Do;
-                let _ = save_app_data(app);
+        for (btn, m) in [(app.matrix_do_btn, TaskMatrix::Do), (app.matrix_schedule_btn, TaskMatrix::Schedule), (app.matrix_delegate_btn, TaskMatrix::Delegate), (app.matrix_eliminate_btn, TaskMatrix::Eliminate)] {
+            if inside_rect(mouse, btn) {
+                set_task_matrix(app, m);
+                return;
             }
-            return;
-        }
-        if inside_rect(mouse, app.matrix_schedule_btn) {
-            if let Some(task) = app.tasks.get_mut(app.current_task_idx) {
-                task.matrix = TaskMatrix::Schedule;
-                let _ = save_app_data(app);
-            }
-            return;
-        }
-        if inside_rect(mouse, app.matrix_delegate_btn) {
-            if let Some(task) = app.tasks.get_mut(app.current_task_idx) {
-                task.matrix = TaskMatrix::Delegate;
-                let _ = save_app_data(app);
-            }
-            return;
-        }
-        if inside_rect(mouse, app.matrix_eliminate_btn) {
-            if let Some(task) = app.tasks.get_mut(app.current_task_idx) {
-                task.matrix = TaskMatrix::Eliminate;
-                let _ = save_app_data(app);
-            }
-            return;
         }
     }
-    
-    // Check task items to select
     if matches!(app.planner_view, PlannerView::List) {
-        if let Some(idx) = find_clicked_item(mouse, &app.task_items.clone()) {
-            app.current_task_idx = idx;
+        if select_clicked(mouse, &app.task_items, &mut app.current_task_idx) {
+            return;
+        }
+        if inside_rect(mouse, app.add_task_btn) {
+            start_editing(app, EditTarget::TaskTitle, new_task_editor_template());
+            app.textarea.move_cursor(CursorMove::Head);
             return;
         }
     }
-
-    // Check add task button
-    if matches!(app.planner_view, PlannerView::List) && inside_rect(mouse, app.add_task_btn) {
-        start_editing(app, EditTarget::TaskTitle, new_task_editor_template());
-        // Position cursor after first parameter (title line)
-        app.textarea.move_cursor(CursorMove::Head);
-        return;
-    }
-
-    // Check edit task button
     if inside_rect(mouse, app.edit_task_btn) {
         if let Some(task) = app.tasks.get(app.current_task_idx) {
             let content = format_task_editor_content(task);
             start_editing(app, EditTarget::TaskDetails, content);
-            // Position cursor at end of first line (title)
             app.textarea.move_cursor(CursorMove::Head);
             app.textarea.move_cursor(CursorMove::End);
         }
         return;
     }
-
-    // Check delete task button
     if inside_rect(mouse, app.delete_task_btn) {
         delete_and_adjust_index(&mut app.tasks, &mut app.current_task_idx);
-        let _ = save_app_data(app);
-        return;
+        save(app);
     }
+}
 
-    // Open reminder edit (same as Edit Task)
+fn planner_items(app: &App) -> &[(usize, Rect)] {
+    if matches!(app.planner_view, PlannerView::Matrix) {
+        &app.matrix_items
+    } else {
+        &app.task_items
+    }
 }
 
 fn handle_planner_mouse_right(app: &mut App, mouse: MouseEvent) {
-    // Right-click on task to delete
-    let items = if matches!(app.planner_view, PlannerView::Matrix) {
-        app.matrix_items.clone()
-    } else {
-        app.task_items.clone()
-    };
-    for (idx, rect) in items {
-        if inside_rect(mouse, rect) {
-            app.current_task_idx = idx;
-            delete_and_adjust_index(&mut app.tasks, &mut app.current_task_idx);
-            let _ = save_app_data(app);
-            return;
-        }
+    if let Some(idx) = find_clicked_item(mouse, &planner_items(app)) {
+        app.current_task_idx = idx;
+        delete_and_adjust_index(&mut app.tasks, &mut app.current_task_idx);
+        save(app);
     }
 }
 
 fn handle_planner_mouse_middle(app: &mut App, mouse: MouseEvent) {
-    // Middle-click to toggle completion
-    let items = if matches!(app.planner_view, PlannerView::Matrix) {
-        app.matrix_items.clone()
-    } else {
-        app.task_items.clone()
-    };
-    if let Some(idx) = find_clicked_item(mouse, &items) {
+    if let Some(idx) = find_clicked_item(mouse, &planner_items(app)) {
         app.current_task_idx = idx;
-        if let Some(task) = app.tasks.get_mut(idx) {
-            task.completed = !task.completed;
+        if mutate_current(&mut app.tasks, idx, |task| task.completed = !task.completed) {
+            save(app);
         }
-        let _ = save_app_data(app);
     }
 }
 
 fn handle_journal_mouse_left(app: &mut App, mouse: MouseEvent) {
-    // Handle textarea mouse clicks for editing
     handle_textarea_mouse_click(app, mouse);
-
     if matches!(app.journal_view, JournalView::Entry) {
         if inside_rect(mouse, app.mistake_book_btn) {
             app.journal_view = JournalView::MistakeList;
             app.current_mistake_date = app.current_journal_date;
             return;
         }
-
-        // Check navigation buttons
         if handle_date_nav(app, mouse) {
             return;
         }
-
-        // Check content area for editing
         if inside_rect(mouse, app.content_edit_area) && !app.is_editing() {
-            let entry = app
-                .journal_entries
-                .iter()
-                .find(|e| e.date == app.current_journal_date)
-                .cloned();
-
-            let content = entry.map(|e| e.content).unwrap_or_default();
+            let content = app.journal_entries.iter().find(|e| e.date == app.current_journal_date).map(|e| e.content.clone()).unwrap_or_default();
             let is_empty = content.is_empty();
             start_editing(app, EditTarget::JournalEntry, content);
-            // Position cursor at start for new entry or at end for existing
             if is_empty {
                 app.textarea.move_cursor(CursorMove::Head);
             }
         }
         return;
     }
-
     if inside_rect(mouse, app.mistake_list_btn) {
         app.journal_view = JournalView::MistakeList;
         return;
@@ -3475,9 +2668,8 @@ fn handle_journal_mouse_left(app: &mut App, mouse: MouseEvent) {
         app.journal_view = JournalView::MistakeLog;
         return;
     }
-
     if matches!(app.journal_view, JournalView::MistakeList) {
-        if let Some(idx) = find_clicked_item(mouse, &app.mistake_list_items.clone()) {
+        if let Some(idx) = find_clicked_item(mouse, &app.mistake_list_items) {
             if let Some(date) = app.mistake_list_dates.get(idx).copied() {
                 app.current_mistake_date = date;
                 app.journal_view = JournalView::MistakeLog;
@@ -3485,19 +2677,12 @@ fn handle_journal_mouse_left(app: &mut App, mouse: MouseEvent) {
         }
         return;
     }
-
     if matches!(app.journal_view, JournalView::MistakeLog) {
         if handle_mistake_date_nav(app, mouse) {
             return;
         }
         if inside_rect(mouse, app.content_edit_area) && !app.is_editing() {
-            let entry = app
-                .mistake_entries
-                .iter()
-                .find(|e| e.date == app.current_mistake_date)
-                .cloned();
-
-            let content = entry.map(|e| e.content).unwrap_or_default();
+            let content = app.mistake_entries.iter().find(|e| e.date == app.current_mistake_date).map(|e| e.content.clone()).unwrap_or_default();
             let is_empty = content.is_empty();
             start_editing(app, EditTarget::MistakeEntry, content);
             if is_empty {
@@ -3507,178 +2692,134 @@ fn handle_journal_mouse_left(app: &mut App, mouse: MouseEvent) {
     }
 }
 
+fn start_edit_head_end(app: &mut App, target: EditTarget, content: String) {
+    start_editing(app, target, content);
+    app.textarea.move_cursor(CursorMove::Head);
+    app.textarea.move_cursor(CursorMove::End);
+}
+
 fn handle_habits_mouse_left(app: &mut App, mouse: MouseEvent) {
-    // Handle textarea mouse clicks for editing
     handle_textarea_mouse_click(app, mouse);
-    
-    // Check Summary button
     if inside_rect(mouse, app.summary_btn) {
         app.show_habits_summary = !app.show_habits_summary;
         return;
     }
-    
-    // Check date navigation buttons first
     if handle_date_nav(app, mouse) {
         return;
     }
-
-    // Check habit list items for selection
-    if let Some(idx) = find_clicked_item(mouse, &app.habit_items.clone()) {
-        app.current_habit_idx = idx;
+    if select_clicked(mouse, &app.habit_items, &mut app.current_habit_idx) {
         return;
     }
-
-    // Buttons
     if inside_rect(mouse, app.add_habit_btn) {
-        let template = new_habit_editor_template(app.current_journal_date);
-        start_editing(app, EditTarget::HabitNew, template);
-        // Position cursor at end of name line
-        app.textarea.move_cursor(CursorMove::Head);
-        app.textarea.move_cursor(CursorMove::End);
+        start_edit_head_end(app, EditTarget::HabitNew, new_habit_editor_template(app.current_journal_date));
         return;
     }
     if inside_rect(mouse, app.mark_done_btn) {
-        if let Some(h) = app.habits.get_mut(app.current_habit_idx) {
+        if mutate_current(&mut app.habits, app.current_habit_idx, |h| {
             let d = app.current_journal_date;
-            if h.marks.contains(&d) {
+            if !h.marks.insert(d) {
                 h.marks.remove(&d);
-            } else {
-                h.marks.insert(d);
             }
-            // Recompute streak from the most recent marked date backwards
-            if let Some(mut day) = h.marks.iter().copied().max() {
-                let mut streak = 0u32;
-                loop {
-                    if h.marks.contains(&day) {
-                        streak += 1;
-                    } else {
-                        break;
-                    }
-                    if let Some(prev) = day.pred_opt() {
-                        day = prev;
-                    } else {
-                        break;
+            h.streak = if let Some(mut day) = h.marks.iter().copied().max() {
+                let mut s = 0u32;
+                while h.marks.contains(&day) {
+                    s += 1;
+                    match day.pred_opt() {
+                        Some(p) => day = p,
+                        None => break,
                     }
                 }
-                h.streak = streak;
+                s
             } else {
-                h.streak = 0;
-            }
+                0
+            };
+        }) {
+            save(app);
         }
-        let _ = save_app_data(app);
         return;
     }
     if inside_rect(mouse, app.edit_habit_btn) {
         if let Some(h) = app.habits.get(app.current_habit_idx) {
-            let content = format_habit_editor_content(h);
-            start_editing(app, EditTarget::Habit, content);
-            // Position cursor at end of name line
-            app.textarea.move_cursor(CursorMove::Head);
-            app.textarea.move_cursor(CursorMove::End);
+            start_edit_head_end(app, EditTarget::Habit, format_habit_editor_content(h));
         }
         return;
     }
     if inside_rect(mouse, app.delete_habit_btn) {
         delete_and_adjust_index(&mut app.habits, &mut app.current_habit_idx);
-        let _ = save_app_data(app);
-        return;
+        save(app);
     }
 }
 
 fn handle_habits_mouse_right(_app: &mut App, _mouse: MouseEvent) {}
 
 fn handle_finance_mouse_left(app: &mut App, mouse: MouseEvent) {
-    // Handle textarea mouse clicks for editing
     handle_textarea_mouse_click(app, mouse);
-    
-    // Check Summary button
     if inside_rect(mouse, app.summary_btn) {
         app.show_finance_summary = !app.show_finance_summary;
         return;
     }
-    
-    // Check date navigation buttons
     if handle_date_nav(app, mouse) {
         return;
     }
-
-    // Check finance list items for selection
-    if let Some(idx) = find_clicked_item(mouse, &app.finance_items.clone()) {
-        app.current_finance_idx = idx;
+    if select_clicked(mouse, &app.finance_items, &mut app.current_finance_idx) {
         return;
     }
-
     if inside_rect(mouse, app.add_fin_btn) {
-        let template = new_finance_editor_template(app.current_journal_date);
-        start_editing(app, EditTarget::FinanceNew, template);
-        // Position cursor at end of category line
-        app.textarea.move_cursor(CursorMove::Head);
-        app.textarea.move_cursor(CursorMove::End);
+        start_edit_head_end(app, EditTarget::FinanceNew, new_finance_editor_template(app.current_journal_date));
         return;
     }
-
     if inside_rect(mouse, app.edit_fin_btn) {
         if let Some(entry) = app.finances.get(app.current_finance_idx) {
-            let content = format_finance_editor_content(entry);
-            start_editing(app, EditTarget::Finance, content);
-            // Position cursor at end of category line
-            app.textarea.move_cursor(CursorMove::Head);
-            app.textarea.move_cursor(CursorMove::End);
+            start_edit_head_end(app, EditTarget::Finance, format_finance_editor_content(entry));
         }
         return;
     }
-
     if inside_rect(mouse, app.delete_fin_btn) {
         delete_and_adjust_index(&mut app.finances, &mut app.current_finance_idx);
-        let _ = save_app_data(app);
+        save(app);
     }
 }
 
 fn handle_calories_mouse_left(app: &mut App, mouse: MouseEvent) {
-    // Handle textarea mouse clicks for editing
     handle_textarea_mouse_click(app, mouse);
-    
-    // Check date navigation buttons
     if handle_date_nav(app, mouse) {
         return;
     }
-
-    // Check calorie list items for selection
-    if let Some(idx) = find_clicked_item(mouse, &app.calorie_items.clone()) {
-        app.current_calorie_idx = idx;
+    if select_clicked(mouse, &app.calorie_items, &mut app.current_calorie_idx) {
         return;
     }
-
     if inside_rect(mouse, app.add_cal_btn) {
-        let template = new_calorie_editor_template(app.current_journal_date);
-        start_editing(app, EditTarget::CaloriesNew, template);
-        // Position cursor at end of meal name line
-        app.textarea.move_cursor(CursorMove::Head);
-        app.textarea.move_cursor(CursorMove::End);
+        start_edit_head_end(app, EditTarget::CaloriesNew, new_calorie_editor_template(app.current_journal_date));
         return;
     }
-
     if inside_rect(mouse, app.edit_cal_btn) {
         if let Some(entry) = app.calories.get(app.current_calorie_idx) {
-            let content = format_calorie_editor_content(entry);
-            start_editing(app, EditTarget::Calories, content);
-            // Position cursor at end of meal name line
-            app.textarea.move_cursor(CursorMove::Head);
-            app.textarea.move_cursor(CursorMove::End);
+            start_edit_head_end(app, EditTarget::Calories, format_calorie_editor_content(entry));
         }
         return;
     }
-
     if inside_rect(mouse, app.delete_cal_btn) {
         delete_and_adjust_index(&mut app.calories, &mut app.current_calorie_idx);
-        let _ = save_app_data(app);
+        save(app);
+    }
+}
+
+fn set_kanban_matrix(app: &mut App, m: TaskMatrix) {
+    if mutate_current(&mut app.kanban_cards, app.current_kanban_card_idx, |card| card.matrix = m) {
+        save(app);
+    }
+}
+
+fn kanban_items(app: &App) -> &[(usize, Rect)] {
+    if matches!(app.kanban_view, KanbanView::Matrix) {
+        &app.kanban_matrix_items
+    } else {
+        &app.kanban_items
     }
 }
 
 fn handle_kanban_mouse_left(app: &mut App, mouse: MouseEvent) {
-    // Handle textarea mouse clicks for editing
     handle_textarea_mouse_click(app, mouse);
-
     if inside_rect(mouse, app.kanban_board_btn) {
         app.kanban_view = KanbanView::Board;
         return;
@@ -3687,85 +2828,44 @@ fn handle_kanban_mouse_left(app: &mut App, mouse: MouseEvent) {
         app.kanban_view = KanbanView::Matrix;
         return;
     }
-
     if matches!(app.kanban_view, KanbanView::Matrix) {
-        if let Some(idx) = find_clicked_item(mouse, &app.kanban_matrix_items.clone()) {
-            app.current_kanban_card_idx = idx;
+        if select_clicked(mouse, &app.kanban_matrix_items, &mut app.current_kanban_card_idx) {
             return;
         }
-        if inside_rect(mouse, app.kanban_matrix_do_btn) {
-            if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
-                card.matrix = TaskMatrix::Do;
-                let _ = save_app_data(app);
+        for (btn, m) in [(app.kanban_matrix_do_btn, TaskMatrix::Do), (app.kanban_matrix_schedule_btn, TaskMatrix::Schedule), (app.kanban_matrix_delegate_btn, TaskMatrix::Delegate), (app.kanban_matrix_eliminate_btn, TaskMatrix::Eliminate)] {
+            if inside_rect(mouse, btn) {
+                set_kanban_matrix(app, m);
+                return;
             }
-            return;
-        }
-        if inside_rect(mouse, app.kanban_matrix_schedule_btn) {
-            if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
-                card.matrix = TaskMatrix::Schedule;
-                let _ = save_app_data(app);
-            }
-            return;
-        }
-        if inside_rect(mouse, app.kanban_matrix_delegate_btn) {
-            if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
-                card.matrix = TaskMatrix::Delegate;
-                let _ = save_app_data(app);
-            }
-            return;
-        }
-        if inside_rect(mouse, app.kanban_matrix_eliminate_btn) {
-            if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
-                card.matrix = TaskMatrix::Eliminate;
-                let _ = save_app_data(app);
-            }
-            return;
         }
     }
-    
     if matches!(app.kanban_view, KanbanView::Board) {
         if inside_rect(mouse, app.add_kanban_btn) {
-            let template = new_kanban_editor_template();
-            start_editing(app, EditTarget::KanbanNew, template);
-            // Position cursor at end of title line
-            app.textarea.move_cursor(CursorMove::Head);
-            app.textarea.move_cursor(CursorMove::End);
+            start_edit_head_end(app, EditTarget::KanbanNew, new_kanban_editor_template());
             return;
         }
-
         if inside_rect(mouse, app.move_left_kanban_btn) {
-            if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
-                card.stage = card.stage.move_left();
-                let _ = save_app_data(app);
+            if mutate_current(&mut app.kanban_cards, app.current_kanban_card_idx, |c| c.stage = c.stage.move_left()) {
+                save(app);
             }
             return;
         }
-
         if inside_rect(mouse, app.move_right_kanban_btn) {
-            if let Some(card) = app.kanban_cards.get_mut(app.current_kanban_card_idx) {
-                card.stage = card.stage.move_right();
-                let _ = save_app_data(app);
+            if mutate_current(&mut app.kanban_cards, app.current_kanban_card_idx, |c| c.stage = c.stage.move_right()) {
+                save(app);
             }
             return;
         }
-
         if inside_rect(mouse, app.delete_kanban_btn) {
             delete_and_adjust_index(&mut app.kanban_cards, &mut app.current_kanban_card_idx);
-            let _ = save_app_data(app);
+            save(app);
             return;
         }
-    }
-
-    if matches!(app.kanban_view, KanbanView::Board) {
         for (idx, rect) in app.kanban_items.clone() {
             if inside_rect(mouse, rect) {
                 app.current_kanban_card_idx = idx;
                 if let Some(card) = app.kanban_cards.get(idx) {
-                    let content = format_kanban_editor_content(card);
-                    start_editing(app, EditTarget::KanbanEdit, content);
-                    // Position cursor at end of title line
-                    app.textarea.move_cursor(CursorMove::Head);
-                    app.textarea.move_cursor(CursorMove::End);
+                    start_edit_head_end(app, EditTarget::KanbanEdit, format_kanban_editor_content(card));
                 }
                 return;
             }
@@ -3774,23 +2874,14 @@ fn handle_kanban_mouse_left(app: &mut App, mouse: MouseEvent) {
 }
 
 fn handle_kanban_mouse_right(app: &mut App, mouse: MouseEvent) {
-    let items = if matches!(app.kanban_view, KanbanView::Matrix) {
-        app.kanban_matrix_items.clone()
-    } else {
-        app.kanban_items.clone()
-    };
-    for (idx, rect) in items {
-        if inside_rect(mouse, rect) {
-            app.current_kanban_card_idx = idx;
-            delete_and_adjust_index(&mut app.kanban_cards, &mut app.current_kanban_card_idx);
-            let _ = save_app_data(app);
-            return;
-        }
+    if let Some(idx) = find_clicked_item(mouse, &kanban_items(app)) {
+        app.current_kanban_card_idx = idx;
+        delete_and_adjust_index(&mut app.kanban_cards, &mut app.current_kanban_card_idx);
+        save(app);
     }
 }
 
 fn handle_notes_mouse_right(app: &mut App, mouse: MouseEvent) {
-    // Right click to delete
     for (level, nb_idx, sec_idx, pg_idx, rect) in app.tree_items.clone() {
         if inside_rect(mouse, rect) {
             app.current_notebook_idx = nb_idx;
@@ -3804,41 +2895,19 @@ fn handle_notes_mouse_right(app: &mut App, mouse: MouseEvent) {
 }
 
 fn handle_notes_mouse_middle(app: &mut App, mouse: MouseEvent) {
-    // Middle click to rename
     for (level, nb_idx, sec_idx, pg_idx, rect) in app.tree_items.clone() {
         if inside_rect(mouse, rect) {
             app.current_notebook_idx = nb_idx;
             app.current_section_idx = sec_idx;
             app.current_page_idx = pg_idx;
             app.hierarchy_level = level;
-
-            // Start editing title
-            match level {
-                HierarchyLevel::Notebook => {
-                    let content = app
-                        .current_notebook()
-                        .map(|n| n.title.clone())
-                        .unwrap_or_default();
-                    app.start_text_editing(content);
-                    app.edit_target = EditTarget::NotebookTitle;
-                }
-                HierarchyLevel::Section => {
-                    let content = app
-                        .current_section()
-                        .map(|s| s.title.clone())
-                        .unwrap_or_default();
-                    app.start_text_editing(content);
-                    app.edit_target = EditTarget::SectionTitle;
-                }
-                HierarchyLevel::Page => {
-                    let content = app
-                        .current_page()
-                        .map(|p| p.title.clone())
-                        .unwrap_or_default();
-                    app.start_text_editing(content);
-                    app.edit_target = EditTarget::PageTitle;
-                }
-            }
+            let (content, target) = match level {
+                HierarchyLevel::Notebook => (app.current_notebook().map(|n| n.title.clone()).unwrap_or_default(), EditTarget::NotebookTitle),
+                HierarchyLevel::Section => (app.current_section().map(|s| s.title.clone()).unwrap_or_default(), EditTarget::SectionTitle),
+                HierarchyLevel::Page => (app.current_page().map(|p| p.title.clone()).unwrap_or_default(), EditTarget::PageTitle),
+            };
+            app.start_text_editing(content);
+            app.edit_target = target;
             return;
         }
     }
@@ -3857,12 +2926,7 @@ fn parse_and_render_table(table_text: &str) -> Option<Vec<Line<'static>>> {
         return None;
     }
 
-    let headers: Vec<&str> = header_line
-        .trim_start_matches('|')
-        .trim_end_matches('|')
-        .split('|')
-        .map(|s| s.trim())
-        .collect();
+    let headers: Vec<&str> = header_line.trim_start_matches('|').trim_end_matches('|').split('|').map(|s| s.trim()).collect();
 
     // Check separator line
     let sep_line = lines.get(1).map(|s| s.trim()).unwrap_or("");
@@ -3877,13 +2941,7 @@ fn parse_and_render_table(table_text: &str) -> Option<Vec<Line<'static>>> {
         .iter()
         .enumerate()
         .flat_map(|(i, h)| {
-            let mut spans = vec![Span::styled(
-                format!(" {:^20} ", h),
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )];
+            let mut spans = vec![Span::styled(format!(" {:^20} ", h), Style::default().bg(Color::DarkGray).fg(Color::White).add_modifier(Modifier::BOLD))];
             if i < headers.len() - 1 {
                 spans.push(Span::raw("│"));
             }
@@ -3903,21 +2961,13 @@ fn parse_and_render_table(table_text: &str) -> Option<Vec<Line<'static>>> {
             continue;
         }
 
-        let cells: Vec<&str> = data_line
-            .trim_start_matches('|')
-            .trim_end_matches('|')
-            .split('|')
-            .map(|s| s.trim())
-            .collect();
+        let cells: Vec<&str> = data_line.trim_start_matches('|').trim_end_matches('|').split('|').map(|s| s.trim()).collect();
 
         let row_spans: Vec<Span> = cells
             .iter()
             .enumerate()
             .flat_map(|(i, cell)| {
-                let mut spans = vec![Span::styled(
-                    format!(" {:20} ", cell),
-                    Style::default().fg(Color::White),
-                )];
+                let mut spans = vec![Span::styled(format!(" {:20} ", cell), Style::default().fg(Color::White))];
                 if i < cells.len() - 1 {
                     spans.push(Span::raw("│"));
                 }
@@ -3944,11 +2994,11 @@ fn parse_and_render_flowchart(flowchart_text: &str) -> Option<Vec<Line<'static>>
 
     for (idx, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        
+
         // Detect flowchart markers: lines starting with >, -, or numbers
         if trimmed.starts_with('>') || trimmed.starts_with("- ") || trimmed.starts_with("1. ") {
             is_flowchart = true;
-            
+
             let (marker, content) = if trimmed.starts_with('>') {
                 (trimmed.chars().next().unwrap().to_string(), trimmed[1..].trim())
             } else if trimmed.starts_with("- ") {
@@ -3961,24 +3011,11 @@ fn parse_and_render_flowchart(flowchart_text: &str) -> Option<Vec<Line<'static>>
             let indent = line.len() - trimmed.len();
             let indent_str = " ".repeat(indent);
 
-            result.push(Line::from(vec![
-                Span::raw(indent_str),
-                Span::styled(
-                    format!("{} ", marker),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    content.to_string(),
-                    Style::default().fg(Color::White),
-                ),
-            ]));
+            result.push(Line::from(vec![Span::raw(indent_str), Span::styled(format!("{} ", marker), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)), Span::styled(content.to_string(), Style::default().fg(Color::White))]));
 
             // Add connector if not last
             if idx < lines.len() - 1 {
-                result.push(Line::from(vec![
-                    Span::raw(format!("{}  ", " ".repeat(indent))),
-                    Span::styled("↓", Style::default().fg(Color::Cyan)),
-                ]));
+                result.push(Line::from(vec![Span::raw(format!("{}  ", " ".repeat(indent))), Span::styled("↓", Style::default().fg(Color::Cyan))]));
             }
         }
     }
@@ -3996,12 +3033,7 @@ fn looks_like_path(path: &str) -> bool {
 }
 
 fn normalize_token(token: &str) -> String {
-    token
-        .trim_matches(|c: char| " ,;')\"].[".contains(c))
-        .trim_matches('(')
-    .trim_matches('[')
-    .trim_matches(']')
-        .to_string()
+    token.trim_matches(|c: char| " ,;')\"].[".contains(c)).trim_matches('(').trim_matches('[').trim_matches(']').to_string()
 }
 
 fn extract_path(line: &str) -> Option<String> {
@@ -4069,33 +3101,32 @@ fn extract_path(line: &str) -> Option<String> {
 }
 
 fn resolve_image_path(raw: &str) -> Option<PathBuf> {
-    let expanded = if raw.starts_with('~') {
-        env::home_dir().map(|h| h.join(raw.trim_start_matches('~')))
-    } else {
-        Some(PathBuf::from(raw))
-    }?;
+    let expanded = if raw.starts_with('~') { env::home_dir().map(|h| h.join(raw.trim_start_matches('~'))) } else { Some(PathBuf::from(raw)) }?;
     if expanded.exists() {
         return Some(expanded);
     }
     std::fs::canonicalize(&expanded).ok()
 }
 
-    // Removed image feature; helper no longer needed
-    // fn clear_inline_images() {}
+// Removed image feature; helper no longer needed
+// fn clear_inline_images() {}
 
 fn inside_rect(mouse: MouseEvent, rect: Rect) -> bool {
-    mouse.row >= rect.y
-        && mouse.row < rect.y + rect.height
-        && mouse.column >= rect.x
-        && mouse.column < rect.x + rect.width
+    mouse.row >= rect.y && mouse.row < rect.y + rect.height && mouse.column >= rect.x && mouse.column < rect.x + rect.width
 }
 
 // Helper: Find clicked item index from mouse event
 fn find_clicked_item(mouse: MouseEvent, items: &[(usize, Rect)]) -> Option<usize> {
-    items
-        .iter()
-        .find(|(_, rect)| inside_rect(mouse, *rect))
-        .map(|(idx, _)| *idx)
+    items.iter().find(|(_, rect)| inside_rect(mouse, *rect)).map(|(idx, _)| *idx)
+}
+
+fn select_clicked(mouse: MouseEvent, items: &[(usize, Rect)], current_idx: &mut usize) -> bool {
+    if let Some(idx) = find_clicked_item(mouse, items) {
+        *current_idx = idx;
+        true
+    } else {
+        false
+    }
 }
 
 // Helper: Set up editor for a given target with initial content
@@ -4116,30 +3147,42 @@ fn delete_and_adjust_index<T>(items: &mut Vec<T>, current_idx: &mut usize) {
     }
 }
 
+fn save(app: &App) {
+    let _ = save_app_data(app);
+}
+
+fn matrix_key(code: KeyCode) -> Option<TaskMatrix> {
+    match code {
+        KeyCode::Char('1') => Some(TaskMatrix::Do),
+        KeyCode::Char('2') => Some(TaskMatrix::Schedule),
+        KeyCode::Char('3') => Some(TaskMatrix::Delegate),
+        KeyCode::Char('4') => Some(TaskMatrix::Eliminate),
+        _ => None,
+    }
+}
+
+fn mutate_current<T>(items: &mut [T], current_idx: usize, f: impl FnOnce(&mut T)) -> bool {
+    if let Some(item) = items.get_mut(current_idx) {
+        f(item);
+        true
+    } else {
+        false
+    }
+}
+
 // Helper: Render button with color
 fn render_button(frame: &mut ratatui::Frame, text: &str, area: Rect, color: Color) {
-    let btn = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(color));
+    let btn = Paragraph::new(text).block(Block::default().borders(Borders::ALL)).alignment(Alignment::Center).style(Style::default().fg(color));
     frame.render_widget(btn, area);
 }
 
-// Helper: Split a rectangular area into N equal horizontal chunks
 fn split_equal_horizontal(area: Rect, count: usize) -> Vec<Rect> {
     if count == 0 {
         return Vec::new();
     }
-    let pct = 100 / count.max(1) as u16;
-    let mut constraints = Vec::with_capacity(count);
-    for _ in 0..count {
-        constraints.push(Constraint::Percentage(pct));
-    }
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(constraints)
-        .split(area)
-        .to_vec()
+    let pct = 100 / count as u16;
+    let constraints: Vec<Constraint> = (0..count).map(|_| Constraint::Percentage(pct)).collect();
+    Layout::default().direction(Direction::Horizontal).constraints(constraints).split(area).to_vec()
 }
 
 fn mistake_list_dates(app: &App) -> Vec<NaiveDate> {
@@ -4151,21 +3194,14 @@ fn mistake_list_dates(app: &App) -> Vec<NaiveDate> {
 // Helper: Handle date navigation button clicks
 fn handle_date_nav(app: &mut App, mouse: MouseEvent) -> bool {
     if inside_rect(mouse, app.prev_day_btn) {
-        app.current_journal_date = app
-            .current_journal_date
-            .pred_opt()
-            .unwrap_or(app.current_journal_date);
+        app.current_journal_date = app.current_journal_date.pred_opt().unwrap_or(app.current_journal_date);
         return true;
     }
     if inside_rect(mouse, app.next_day_btn) {
-        app.current_journal_date = app
-            .current_journal_date
-            .succ_opt()
-            .unwrap_or(app.current_journal_date);
+        app.current_journal_date = app.current_journal_date.succ_opt().unwrap_or(app.current_journal_date);
         return true;
     }
     if inside_rect(mouse, app.date_btn) {
-        // Open calendar picker
         app.show_calendar = true;
         app.calendar_target = CalendarTarget::Journal;
         app.calendar_year = app.current_journal_date.year();
@@ -4181,17 +3217,11 @@ fn handle_date_nav(app: &mut App, mouse: MouseEvent) -> bool {
 
 fn handle_mistake_date_nav(app: &mut App, mouse: MouseEvent) -> bool {
     if inside_rect(mouse, app.prev_day_btn) {
-        app.current_mistake_date = app
-            .current_mistake_date
-            .pred_opt()
-            .unwrap_or(app.current_mistake_date);
+        app.current_mistake_date = app.current_mistake_date.pred_opt().unwrap_or(app.current_mistake_date);
         return true;
     }
     if inside_rect(mouse, app.next_day_btn) {
-        app.current_mistake_date = app
-            .current_mistake_date
-            .succ_opt()
-            .unwrap_or(app.current_mistake_date);
+        app.current_mistake_date = app.current_mistake_date.succ_opt().unwrap_or(app.current_mistake_date);
         return true;
     }
     if inside_rect(mouse, app.date_btn) {
@@ -4208,48 +3238,29 @@ fn handle_mistake_date_nav(app: &mut App, mouse: MouseEvent) -> bool {
     false
 }
 
-// Helper: Build and track list items with rects for mouse interaction
-fn build_list_items(
-    items_iter: Vec<(usize, String, bool)>,
-    current_idx: usize,
-    area: Rect,
-    item_rects: &mut Vec<(usize, Rect)>,
-) -> Vec<ListItem<'_>> {
+fn build_list_items(items_iter: Vec<(usize, String, bool)>, current_idx: usize, area: Rect, item_rects: &mut Vec<(usize, Rect)>) -> Vec<ListItem<'_>> {
     let inner_y = area.y + 1;
-    let mut items = Vec::new();
-    let mut row_idx = 0;
-
-    for (idx, text, is_completed) in items_iter {
-        let style = if idx == current_idx {
-            Style::default().bg(Color::Blue).fg(Color::White)
-        } else if is_completed {
-            Style::default().fg(Color::DarkGray)
-        } else {
-            Style::default()
-        };
-
-        let item_rect = Rect {
-            x: area.x,
-            y: inner_y + row_idx as u16,
-            width: area.width,
-            height: 1,
-        };
-        item_rects.push((idx, item_rect));
-
-        items.push(ListItem::new(text).style(style));
-        row_idx += 1;
-    }
-
-    items
+    items_iter
+        .into_iter()
+        .enumerate()
+        .map(|(row, (idx, text, done))| {
+            let style = if idx == current_idx {
+                Style::default().bg(Color::Blue).fg(Color::White)
+            } else if done {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            item_rects.push((idx, Rect { x: area.x, y: inner_y + row as u16, width: area.width, height: 1 }));
+            ListItem::new(text).style(style)
+        })
+        .collect()
 }
 
 fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     app.validate_indices();
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(5)])
-        .split(frame.size());
+    let chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(3), Constraint::Min(5)]).split(frame.size());
 
     // View mode selector
     draw_view_mode_selector(frame, app, chunks[0]);
@@ -4257,10 +3268,7 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     // Body based on view mode
     match app.view_mode {
         ViewMode::Notes => {
-            let body = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-                .split(chunks[1]);
+            let body = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(30), Constraint::Percentage(70)]).split(chunks[1]);
             draw_left_panel(frame, app, body[0]);
             draw_content_panel(frame, app, body[1]);
         }
@@ -4313,198 +3321,34 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
 }
 
 fn draw_view_mode_selector(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(11),
-            Constraint::Percentage(11),
-            Constraint::Percentage(11),
-            Constraint::Percentage(11),
-            Constraint::Percentage(11),
-            Constraint::Percentage(11),
-            Constraint::Percentage(11),
-            Constraint::Percentage(11),
-            Constraint::Percentage(12),
-        ])
-        .split(area);
-
+    let chunks = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(11), Constraint::Percentage(11), Constraint::Percentage(11), Constraint::Percentage(11), Constraint::Percentage(11), Constraint::Percentage(11), Constraint::Percentage(11), Constraint::Percentage(11), Constraint::Percentage(12)]).split(area);
     app.view_mode_btns.clear();
-
-    let notes_style = if matches!(app.view_mode, ViewMode::Notes) {
-        Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Cyan)
-    };
-    let notes_btn = Paragraph::new("Notes")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(notes_style);
-    app.view_mode_btns.push((ViewMode::Notes, chunks[0]));
-    frame.render_widget(notes_btn, chunks[0]);
-
-    let planner_style = if matches!(app.view_mode, ViewMode::Planner) {
-        Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Green)
-    };
-    let planner_btn = Paragraph::new("Planner")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(planner_style);
-    app.view_mode_btns.push((ViewMode::Planner, chunks[1]));
-    frame.render_widget(planner_btn, chunks[1]);
-
-    let journal_style = if matches!(app.view_mode, ViewMode::Journal) {
-        Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Yellow)
-    };
-    let journal_btn = Paragraph::new("Journal")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(journal_style);
-    app.view_mode_btns.push((ViewMode::Journal, chunks[2]));
-    frame.render_widget(journal_btn, chunks[2]);
-
-    let habits_style = if matches!(app.view_mode, ViewMode::Habits) {
-        Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Magenta)
-    };
-    let habits_btn = Paragraph::new("Habits")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(habits_style);
-    app.view_mode_btns.push((ViewMode::Habits, chunks[3]));
-    frame.render_widget(habits_btn, chunks[3]);
-
-    let finance_style = if matches!(app.view_mode, ViewMode::Finance) {
-        Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Green)
-    };
-    let finance_btn = Paragraph::new("Finances")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(finance_style);
-    app.view_mode_btns.push((ViewMode::Finance, chunks[4]));
-    frame.render_widget(finance_btn, chunks[4]);
-
-    let cal_style = if matches!(app.view_mode, ViewMode::Calories) {
-        Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Red)
-    };
-    let cal_btn = Paragraph::new("Calories")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(cal_style);
-    app.view_mode_btns.push((ViewMode::Calories, chunks[5]));
-    frame.render_widget(cal_btn, chunks[5]);
-
-    let kanban_style = if matches!(app.view_mode, ViewMode::Kanban) {
-        Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::LightBlue)
-    };
-    let kanban_btn = Paragraph::new("Kanban")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(kanban_style);
-    app.view_mode_btns.push((ViewMode::Kanban, chunks[6]));
-    frame.render_widget(kanban_btn, chunks[6]);
-
-    let cards_style = if matches!(app.view_mode, ViewMode::Flashcards) {
-        Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::LightMagenta)
-    };
-    let cards_btn = Paragraph::new("Flashcards")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(cards_style);
-    app.view_mode_btns.push((ViewMode::Flashcards, chunks[7]));
-    frame.render_widget(cards_btn, chunks[7]);
-
-    let search_style = if app.show_global_search {
-        Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::LightGreen)
-    };
-    let search_btn = Paragraph::new("Search (Ctrl+F)")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(search_style);
+    let active = Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD);
+    let modes: [(ViewMode, &str, Color); 8] = [(ViewMode::Notes, "Notes", Color::Cyan), (ViewMode::Planner, "Planner", Color::Green), (ViewMode::Journal, "Journal", Color::Yellow), (ViewMode::Habits, "Habits", Color::Magenta), (ViewMode::Finance, "Finances", Color::Green), (ViewMode::Calories, "Calories", Color::Red), (ViewMode::Kanban, "Kanban", Color::LightBlue), (ViewMode::Flashcards, "Flashcards", Color::LightMagenta)];
+    for (i, (mode, label, color)) in modes.iter().enumerate() {
+        let style = if app.view_mode == *mode { active } else { Style::default().fg(*color) };
+        let btn = Paragraph::new(*label).block(Block::default().borders(Borders::ALL)).alignment(Alignment::Center).style(style);
+        app.view_mode_btns.push((*mode, chunks[i]));
+        frame.render_widget(btn, chunks[i]);
+    }
+    let search_style = if app.show_global_search { active } else { Style::default().fg(Color::LightGreen) };
+    let search_btn = Paragraph::new("Search (Ctrl+F)").block(Block::default().borders(Borders::ALL)).alignment(Alignment::Center).style(search_style);
     app.search_btn = chunks[8];
     frame.render_widget(search_btn, chunks[8]);
 }
 
 fn draw_left_panel(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(3)])
-        .split(area);
-
-    // Tree hierarchy
+    let chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(5), Constraint::Length(3)]).split(area);
     draw_tree_panel(frame, app, chunks[0]);
-
-    // Buttons
     let btn_chunks = split_equal_horizontal(chunks[1], 4);
-
-    let add_nb_btn = Paragraph::new("New Notebook")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Green));
     app.add_notebook_btn = btn_chunks[0];
-    frame.render_widget(add_nb_btn, btn_chunks[0]);
-
-    let add_sec_btn = Paragraph::new("New Section")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Yellow));
+    render_button(frame, "New Notebook", btn_chunks[0], Color::Green);
     app.add_section_btn = btn_chunks[1];
-    frame.render_widget(add_sec_btn, btn_chunks[1]);
-
-    let add_pg_btn = Paragraph::new("New Page")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Blue));
+    render_button(frame, "New Section", btn_chunks[1], Color::Yellow);
     app.add_page_btn = btn_chunks[2];
-    frame.render_widget(add_pg_btn, btn_chunks[2]);
-
-    let del_btn = Paragraph::new("Delete Item")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Red));
+    render_button(frame, "New Page", btn_chunks[2], Color::Blue);
     app.delete_btn = btn_chunks[3];
-    frame.render_widget(del_btn, btn_chunks[3]);
+    render_button(frame, "Delete Item", btn_chunks[3], Color::Red);
 }
 
 fn draw_tree_panel(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
@@ -4515,162 +3359,69 @@ fn draw_tree_panel(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let inner_y = area.y + 1;
     let item_height = 1;
 
+    let selected_bg = Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD);
+    let mk_rect = |r: u16| Rect { x: area.x, y: inner_y + r, width: area.width, height: item_height };
     for (nb_idx, notebook) in app.notebooks.iter().enumerate() {
         let is_current = nb_idx == app.current_notebook_idx;
         let selected = is_current && matches!(app.hierarchy_level, HierarchyLevel::Notebook);
-
         let nb_style = if selected {
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
+            selected_bg
         } else if is_current {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
-
-        let item_rect = Rect {
-            x: area.x,
-            y: inner_y + row,
-            width: area.width,
-            height: item_height,
-        };
-        tree_items.push((HierarchyLevel::Notebook, nb_idx, 0, 0, item_rect));
+        tree_items.push((HierarchyLevel::Notebook, nb_idx, 0, 0, mk_rect(row)));
         items.push(ListItem::new(format!(" {}", notebook.title)).style(nb_style));
         row += 1;
-
         for (sec_idx, section) in notebook.sections.iter().enumerate() {
-            let is_current_section = is_current && sec_idx == app.current_section_idx;
-            let selected_section =
-                is_current_section && matches!(app.hierarchy_level, HierarchyLevel::Section);
-
-            let sec_style = if selected_section {
-                Style::default()
-                    .bg(Color::Blue)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else if is_current_section {
+            let is_cs = is_current && sec_idx == app.current_section_idx;
+            let selected_s = is_cs && matches!(app.hierarchy_level, HierarchyLevel::Section);
+            let sec_style = if selected_s {
+                selected_bg
+            } else if is_cs {
                 Style::default().fg(Color::Yellow)
             } else {
                 Style::default()
             };
-
-            let item_rect = Rect {
-                x: area.x,
-                y: inner_y + row,
-                width: area.width,
-                height: item_height,
-            };
-            tree_items.push((HierarchyLevel::Section, nb_idx, sec_idx, 0, item_rect));
+            tree_items.push((HierarchyLevel::Section, nb_idx, sec_idx, 0, mk_rect(row)));
             items.push(ListItem::new(format!("   {}", section.title)).style(sec_style));
             row += 1;
-
             for (pg_idx, page) in section.pages.iter().enumerate() {
-                let is_current_page = is_current_section && pg_idx == app.current_page_idx;
-                let selected_page =
-                    is_current_page && matches!(app.hierarchy_level, HierarchyLevel::Page);
-
-                let pg_style = if selected_page {
-                    Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                } else if is_current_page {
+                let is_cp = is_cs && pg_idx == app.current_page_idx;
+                let selected_p = is_cp && matches!(app.hierarchy_level, HierarchyLevel::Page);
+                let pg_style = if selected_p {
+                    selected_bg
+                } else if is_cp {
                     Style::default().fg(Color::Green)
                 } else {
                     Style::default()
                 };
-
-                let item_rect = Rect {
-                    x: area.x,
-                    y: inner_y + row,
-                    width: area.width,
-                    height: item_height,
-                };
-                tree_items.push((HierarchyLevel::Page, nb_idx, sec_idx, pg_idx, item_rect));
+                tree_items.push((HierarchyLevel::Page, nb_idx, sec_idx, pg_idx, mk_rect(row)));
                 items.push(ListItem::new(format!("      {}", page.title)).style(pg_style));
                 row += 1;
             }
         }
     }
-
     app.tree_items = tree_items;
-
-    let list = List::new(items).block(
-        Block::default()
-            .title("Tree (Left: select - Middle: rename - Right: delete)")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan)),
-    );
-
+    let list = List::new(items).block(Block::default().title("Tree (Left: select - Middle: rename - Right: delete)").borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)));
     frame.render_widget(list, area);
 }
 
 fn draw_content_panel(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(5)])
-        .split(area);
-
-    // Info panel with links and images count
+    let chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(5), Constraint::Min(5)]).split(area);
     let info_text = match app.hierarchy_level {
-        HierarchyLevel::Notebook => {
-            if let Some(notebook) = app.current_notebook() {
-                format!(
-                    "Notes {}\nSections: {} | Created: {}",
-                    notebook.title,
-                    notebook.sections.len(),
-                    notebook.created_at
-                )
-            } else {
-                "No notebook selected".to_string()
-            }
-        }
-        HierarchyLevel::Section => {
-            if let Some(section) = app.current_section() {
-                // Aggregate link/image counts across pages
-                let mut links = 0usize;
-                let mut images = 0usize;
-                for p in &section.pages {
-                    links += p.links.len();
-                    images += p.images.len();
-                }
-                format!(
-                    "Section {}\nPages: {} | Links {} | Images {} | Created: {}",
-                    section.title,
-                    section.pages.len(),
-                    links,
-                    images,
-                    section.created_at
-                )
-            } else {
-                "No section selected".to_string()
-            }
-        }
-        HierarchyLevel::Page => {
-            if let Some(page) = app.current_page() {
-                format!(
-                    "Page {} | Modified: {}\nLinks {} links | Images  {} images",
-                    page.title,
-                    page.modified_at,
-                    page.links.len(),
-                    page.images.len()
-                )
-            } else {
-                "No page selected".to_string()
-            }
-        }
+        HierarchyLevel::Notebook => app.current_notebook().map(|nb| format!("Notes {}\nSections: {} | Created: {}", nb.title, nb.sections.len(), nb.created_at)).unwrap_or_else(|| "No notebook selected".to_string()),
+        HierarchyLevel::Section => app
+            .current_section()
+            .map(|s| {
+                let (links, images) = s.pages.iter().fold((0usize, 0usize), |(l, i), p| (l + p.links.len(), i + p.images.len()));
+                format!("Section {}\nPages: {} | Links {} | Images {} | Created: {}", s.title, s.pages.len(), links, images, s.created_at)
+            })
+            .unwrap_or_else(|| "No section selected".to_string()),
+        HierarchyLevel::Page => app.current_page().map(|p| format!("Page {} | Modified: {}\nLinks {} links | Images  {} images", p.title, p.modified_at, p.links.len(), p.images.len())).unwrap_or_else(|| "No page selected".to_string()),
     };
-
-    let info_panel = Paragraph::new(info_text)
-        .block(Block::default().title("Info").borders(Borders::ALL))
-        .style(Style::default().fg(Color::White));
-    frame.render_widget(info_panel, chunks[0]);
-
-    // Content panel - render with enhanced formatting
+    frame.render_widget(Paragraph::new(info_text).block(Block::default().title("Info").borders(Borders::ALL)).style(Style::default().fg(Color::White)), chunks[0]);
     if app.is_editing() {
         render_editing_panel(frame, app, chunks[1]);
     } else {
@@ -4679,95 +3430,33 @@ fn draw_content_panel(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
 }
 
 fn render_editing_panel(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    // Inline mode is no longer used for content editing; fall through to textarea-based editing.
-
-    let (title, _content) = match app.edit_target {
-        EditTarget::NotebookTitle => (
-            "Renaming Notebook (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::SectionTitle => (
-            "Edit Renaming Section (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::PageTitle => (
-            "Edit Renaming Page (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::PageContent => (
-            "Editing Content (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::TaskTitle => (
-            "Edit New Task (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::TaskDetails => (
-            "Edit Task (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::JournalEntry => (
-            "Edit Journal Entry (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::MistakeEntry => (
-            "Edit Mistake Entry (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::HabitNew => (
-            "Edit New Habit - Fill Name/Frequency/Status fields (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::Habit => (
-            "Edit Habit - Update Name/Frequency/Status fields (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::FinanceNew => (
-            "Finance New Finance Entry (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::Finance => (
-            "Finance Edit Finance Entry (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::CaloriesNew => (
-            "Calories New Meal (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::Calories => (
-            "Calories Edit Meal (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::KanbanNew => (
-            "Kanban New Card (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::KanbanEdit => (
-            "Kanban Edit Card (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::CardNew => (
-            "New Flashcard - Format: front text\\n---\\nback text\\n---\\ncollection (optional) (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::CardEdit => (
-            "Edit Flashcard - Format: front text\\n---\\nback text\\n---\\ncollection (optional) (Ctrl+S to save, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::CardImport => (
-            "Import Flashcards - Enter file path (Ctrl+S to import, Esc to cancel)",
-            app.editing_input.clone(),
-        ),
-        EditTarget::FindReplace => ("Find Find & Replace (Ctrl+H)", app.find_text.clone()),
-        EditTarget::None => ("Content", String::new()),
-    };
-
-    // Special handling for Find and Replace
     if matches!(app.edit_target, EditTarget::FindReplace) {
         draw_find_replace_ui(frame, app, area);
         return;
     }
-
+    let title = match app.edit_target {
+        EditTarget::NotebookTitle => "Renaming Notebook (Ctrl+S to save, Esc to cancel)",
+        EditTarget::SectionTitle => "Edit Renaming Section (Ctrl+S to save, Esc to cancel)",
+        EditTarget::PageTitle => "Edit Renaming Page (Ctrl+S to save, Esc to cancel)",
+        EditTarget::PageContent => "Editing Content (Ctrl+S to save, Esc to cancel)",
+        EditTarget::TaskTitle => "Edit New Task (Ctrl+S to save, Esc to cancel)",
+        EditTarget::TaskDetails => "Edit Task (Ctrl+S to save, Esc to cancel)",
+        EditTarget::JournalEntry => "Edit Journal Entry (Ctrl+S to save, Esc to cancel)",
+        EditTarget::MistakeEntry => "Edit Mistake Entry (Ctrl+S to save, Esc to cancel)",
+        EditTarget::HabitNew => "Edit New Habit - Fill Name/Frequency/Status fields (Ctrl+S to save, Esc to cancel)",
+        EditTarget::Habit => "Edit Habit - Update Name/Frequency/Status fields (Ctrl+S to save, Esc to cancel)",
+        EditTarget::FinanceNew => "Finance New Finance Entry (Ctrl+S to save, Esc to cancel)",
+        EditTarget::Finance => "Finance Edit Finance Entry (Ctrl+S to save, Esc to cancel)",
+        EditTarget::CaloriesNew => "Calories New Meal (Ctrl+S to save, Esc to cancel)",
+        EditTarget::Calories => "Calories Edit Meal (Ctrl+S to save, Esc to cancel)",
+        EditTarget::KanbanNew => "Kanban New Card (Ctrl+S to save, Esc to cancel)",
+        EditTarget::KanbanEdit => "Kanban Edit Card (Ctrl+S to save, Esc to cancel)",
+        EditTarget::CardNew => "New Flashcard - Format: front text\\n---\\nback text\\n---\\ncollection (optional) (Ctrl+S to save, Esc to cancel)",
+        EditTarget::CardEdit => "Edit Flashcard - Format: front text\\n---\\nback text\\n---\\ncollection (optional) (Ctrl+S to save, Esc to cancel)",
+        EditTarget::CardImport => "Import Flashcards - Enter file path (Ctrl+S to import, Esc to cancel)",
+        EditTarget::FindReplace => "Find Find & Replace (Ctrl+H)",
+        EditTarget::None => "Content",
+    };
     app.content_edit_area = area;
     render_textarea_editor(frame, app, area, title);
 }
@@ -4842,7 +3531,7 @@ fn render_formatted_content(frame: &mut ratatui::Frame, app: &mut App, area: Rec
         if line.trim().starts_with('|') && !in_code_block {
             let table_start = i;
             let mut table_end = i + 1;
-            
+
             // Find end of table
             while table_end < content_lines.len() && content_lines[table_end].trim().starts_with('|') {
                 table_end += 1;
@@ -4863,7 +3552,7 @@ fn render_formatted_content(frame: &mut ratatui::Frame, app: &mut App, area: Rec
         if (line.trim().starts_with('>') || line.trim().starts_with("1. ")) && !in_code_block {
             let flowchart_start = i;
             let mut flowchart_end = i + 1;
-            
+
             // Find consecutive flowchart lines (>, -, or numbered)
             while flowchart_end < content_lines.len() {
                 let next_line = content_lines[flowchart_end].trim();
@@ -4889,23 +3578,14 @@ fn render_formatted_content(frame: &mut ratatui::Frame, app: &mut App, area: Rec
             in_code_block = !in_code_block;
             if in_code_block {
                 code_lang = line.trim_start_matches("```").to_string();
-                lines.push(Line::from(Span::styled(
-                    line,
-                    Style::default().fg(Color::DarkGray),
-                )));
+                lines.push(Line::from(Span::styled(line, Style::default().fg(Color::DarkGray))));
             } else {
                 code_lang.clear();
-                lines.push(Line::from(Span::styled(
-                    line,
-                    Style::default().fg(Color::DarkGray),
-                )));
+                lines.push(Line::from(Span::styled(line, Style::default().fg(Color::DarkGray))));
             }
         } else if in_code_block {
             // Syntax highlighted code
-            lines.push(Line::from(Span::styled(
-                line,
-                Style::default().fg(Color::Green),
-            )));
+            lines.push(Line::from(Span::styled(line, Style::default().fg(Color::Green))));
         } else {
             // Regular text (links not rendered as clickable)
             lines.push(Line::from(line.to_string()));
@@ -4921,9 +3601,7 @@ fn render_formatted_content(frame: &mut ratatui::Frame, app: &mut App, area: Rec
         HierarchyLevel::Notebook => "Notebook Overview — sections and pages",
     };
 
-    let content_block = Block::default()
-        .title(title)
-        .borders(Borders::ALL);
+    let content_block = Block::default().title(title).borders(Borders::ALL);
 
     // Calculate scrollbar state
     let total_lines = lines.len();
@@ -4932,471 +3610,143 @@ fn render_formatted_content(frame: &mut ratatui::Frame, app: &mut App, area: Rec
     let mut scrollbar_state = ScrollbarState::new(total_lines).position(app.content_scroll as usize);
 
     // Reserve space for scrollbar on the right
-    let content_area = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width.saturating_sub(1),
-        height: area.height,
-    };
+    let content_area = Rect { x: area.x, y: area.y, width: area.width.saturating_sub(1), height: area.height };
 
-    let scrollbar_area = Rect {
-        x: area.x + area.width.saturating_sub(1),
-        y: area.y + 1,
-        width: 1,
-        height: area.height.saturating_sub(2),
-    };
+    let scrollbar_area = Rect { x: area.x + area.width.saturating_sub(1), y: area.y + 1, width: 1, height: area.height.saturating_sub(2) };
 
-    let content_panel = Paragraph::new(lines)
-        .block(content_block)
-        .wrap(Wrap { trim: false })
-        .scroll((app.content_scroll, 0));
+    let content_panel = Paragraph::new(lines).block(content_block).wrap(Wrap { trim: false }).scroll((app.content_scroll, 0));
 
     frame.render_widget(content_panel, content_area);
 
     // Render scrollbar
-    frame.render_stateful_widget(
-        Scrollbar::default()
-            .orientation(ScrollbarOrientation::VerticalRight)
-            .style(Style::default().fg(Color::Gray)),
-        scrollbar_area,
-        &mut scrollbar_state,
-    );
+    frame.render_stateful_widget(Scrollbar::default().orientation(ScrollbarOrientation::VerticalRight).style(Style::default().fg(Color::Gray)), scrollbar_area, &mut scrollbar_state);
 }
 
 fn draw_find_replace_ui(frame: &mut ratatui::Frame, app: &App, area: Rect) {
-    // Split the area into sections: title, find input, replace input, buttons, and instructions
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Find input
-            Constraint::Length(3), // Replace input
-            Constraint::Length(3), // Buttons and info
-            Constraint::Min(1),    // Status
-        ])
-        .split(area);
-
-    // Find input field
-    let find_style = if app.find_input_focus {
-        Style::default().fg(Color::White).bg(Color::Blue)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-
-    let find_label = if !app.find_text.is_empty() {
-        format!(
-            "Find: {} | {} matches",
-            app.find_text,
-            app.current_page()
-                .map(|p| p.content.matches(&app.find_text).count())
-                .unwrap_or(0)
-        )
-    } else {
-        "Find: (type search term)".to_string()
-    };
-
-    let find_widget = Paragraph::new(app.find_text.clone())
-        .block(Block::default().title(find_label).borders(Borders::ALL))
-        .style(find_style);
-    frame.render_widget(find_widget, chunks[0]);
-
-    // Replace input field
-    let replace_style = if !app.find_input_focus {
-        Style::default().fg(Color::White).bg(Color::Blue)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-
-    let replace_widget = Paragraph::new(app.replace_text.clone())
-        .block(
-            Block::default()
-                .title("Replace with: (Tab to switch)")
-                .borders(Borders::ALL),
-        )
-        .style(replace_style);
-    frame.render_widget(replace_widget, chunks[1]);
-
-    // Instructions
-    let instructions = vec![
-        Line::from("Tab: Switch field | Enter: Replace all | Esc: Cancel"),
-        Line::from(format!(
-            "Press Enter to replace all {} matches with '{}'",
-            app.current_page()
-                .map(|p| p.content.matches(&app.find_text).count())
-                .unwrap_or(0),
-            app.replace_text
-        )),
-    ];
-
-    let info_widget = Paragraph::new(instructions)
-        .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().fg(Color::Cyan));
-    frame.render_widget(info_widget, chunks[2]);
+    let chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(3), Constraint::Length(3), Constraint::Length(3), Constraint::Min(1)]).split(area);
+    let match_count = app.current_page().map(|p| p.content.matches(&app.find_text).count()).unwrap_or(0);
+    let find_style = if app.find_input_focus { Style::default().fg(Color::White).bg(Color::Blue) } else { Style::default().fg(Color::Gray) };
+    let find_label = if !app.find_text.is_empty() { format!("Find: {} | {} matches", app.find_text, match_count) } else { "Find: (type search term)".to_string() };
+    frame.render_widget(Paragraph::new(app.find_text.clone()).block(Block::default().title(find_label).borders(Borders::ALL)).style(find_style), chunks[0]);
+    let replace_style = if !app.find_input_focus { Style::default().fg(Color::White).bg(Color::Blue) } else { Style::default().fg(Color::Gray) };
+    frame.render_widget(Paragraph::new(app.replace_text.clone()).block(Block::default().title("Replace with: (Tab to switch)").borders(Borders::ALL)).style(replace_style), chunks[1]);
+    frame.render_widget(Paragraph::new(vec![Line::from("Tab: Switch field | Enter: Replace all | Esc: Cancel"), Line::from(format!("Press Enter to replace all {} matches with '{}'", match_count, app.replace_text))]).block(Block::default().borders(Borders::ALL)).style(Style::default().fg(Color::Cyan)), chunks[2]);
 }
 
 fn draw_global_search_overlay(frame: &mut ratatui::Frame, app: &mut App) {
     let size = frame.size();
-    let width = size.width.saturating_mul(3) / 4;
-    let height = size.height.saturating_mul(3) / 4;
-    let x = size.x + (size.width.saturating_sub(width)) / 2;
-    let y = size.y + (size.height.saturating_sub(height)) / 2;
-    let area = Rect { x, y, width, height };
-
+    let width = size.width * 3 / 4;
+    let height = size.height * 3 / 4;
+    let area = Rect { x: size.x + (size.width.saturating_sub(width)) / 2, y: size.y + (size.height.saturating_sub(height)) / 2, width, height };
     frame.render_widget(Clear, area);
-
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(5)])
-        .split(area);
-
-    let input_label = format!(
-        "Global Search (Esc to close, Enter to open, ↑↓ navigate) — {} results",
-        app.global_search_results.len()
-    );
-    let input_widget = Paragraph::new(app.global_search_query.clone())
-        .block(Block::default().title(input_label).borders(Borders::ALL))
-        .style(Style::default().fg(Color::White).bg(Color::DarkGray));
-    frame.render_widget(input_widget, layout[0]);
-
+    let layout = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(3), Constraint::Min(5)]).split(area);
+    frame.render_widget(Paragraph::new(app.global_search_query.clone()).block(Block::default().title(format!("Global Search (Esc to close, Enter to open, ↑↓ navigate) — {} results", app.global_search_results.len())).borders(Borders::ALL)).style(Style::default().fg(Color::White).bg(Color::DarkGray)), layout[0]);
     let list_area = layout[1];
     app.search_result_items.clear();
-
     if app.global_search_results.is_empty() {
-        let hint = Paragraph::new("Type to search across notes, tasks, journal, mistake book, habits, finance, calories, and kanban.")
-            .block(Block::default().title("Results").borders(Borders::ALL))
-            .style(Style::default().fg(Color::Gray));
-        frame.render_widget(hint, list_area);
+        frame.render_widget(Paragraph::new("Type to search across notes, tasks, journal, mistake book, habits, finance, calories, and kanban.").block(Block::default().title("Results").borders(Borders::ALL)).style(Style::default().fg(Color::Gray)), list_area);
         return;
     }
-
     let max_rows = list_area.height.saturating_sub(2) as usize;
-    let offset = if app.global_search_selected >= max_rows {
-        app.global_search_selected + 1 - max_rows
-    } else {
-        0
-    };
-
-    let visible = app
+    let offset = app.global_search_selected.saturating_sub(max_rows.saturating_sub(1));
+    let items: Vec<ListItem> = app
         .global_search_results
         .iter()
         .enumerate()
         .skip(offset)
         .take(max_rows)
-        .collect::<Vec<_>>();
+        .enumerate()
+        .map(|(row, (idx, hit))| {
+            let style = if idx == app.global_search_selected { Style::default().bg(Color::Blue).fg(Color::White) } else { Style::default() };
+            app.search_result_items.push((idx, Rect { x: list_area.x, y: list_area.y + 1 + row as u16, width: list_area.width, height: 1 }));
+            ListItem::new(format!("{} — {}", hit.title, hit.detail)).style(style)
+        })
+        .collect();
+    frame.render_widget(List::new(items).block(Block::default().title("Results").borders(Borders::ALL)).highlight_symbol("▶ "), list_area);
+}
 
-    let mut items = Vec::new();
-    let mut row_idx = 0u16;
-
-    for (idx, hit) in visible {
-        let selected = idx == app.global_search_selected;
-        let style = if selected {
-            Style::default().bg(Color::Blue).fg(Color::White)
-        } else {
-            Style::default()
-        };
-
-        let text = format!("{} — {}", hit.title, hit.detail);
-        let item_rect = Rect {
-            x: list_area.x,
-            y: list_area.y + 1 + row_idx,
-            width: list_area.width,
-            height: 1,
-        };
-        app.search_result_items.push((idx, item_rect));
-
-        items.push(ListItem::new(text).style(style));
-        row_idx += 1;
-    }
-
-    let list = List::new(items)
-        .block(Block::default().title("Results").borders(Borders::ALL))
-        .highlight_symbol("▶ ");
-    frame.render_widget(list, list_area);
+fn draw_message_popup(frame: &mut ratatui::Frame, title: &str, msg: &str, color: Color, width_pct: u16, height_pct: u16) {
+    let size = frame.size();
+    let area = get_popup_area(size.width, size.height, width_pct, height_pct);
+    let block = Block::default().title(title).borders(Borders::ALL).border_type(BorderType::Rounded).style(Style::default().fg(color).bg(Color::Black));
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    let chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(2), Constraint::Length(1)]).split(inner);
+    frame.render_widget(Paragraph::new(msg).wrap(Wrap { trim: true }).alignment(Alignment::Center).style(Style::default().fg(Color::White)), chunks[0]);
+    frame.render_widget(Paragraph::new("Press Esc to dismiss").alignment(Alignment::Center).style(Style::default().fg(Color::DarkGray).italic()), chunks[1]);
 }
 
 fn draw_validation_error_popup(frame: &mut ratatui::Frame, app: &App) {
-    let size = frame.size();
-    let area = get_popup_area(size.width, size.height, 70, 38);
-
-    let block = Block::default()
-        .title("[!] Validation Error")
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .style(Style::default().fg(Color::Red).bg(Color::Black));
-
-    let inner = block.inner(area);
-    frame.render_widget(Clear, area);
-    frame.render_widget(block, area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
-        .split(inner);
-
-    // Error message
-    let para = Paragraph::new(app.validation_error_message.as_str())
-        .wrap(Wrap { trim: true })
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::White));
-    frame.render_widget(para, chunks[0]);
-
-    // Dismiss hint
-    let hint = Paragraph::new("Press Esc to dismiss")
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::DarkGray).italic());
-    frame.render_widget(hint, chunks[1]);
+    draw_message_popup(frame, "[!] Validation Error", &app.validation_error_message, Color::Red, 70, 38);
 }
 
 fn draw_success_popup(frame: &mut ratatui::Frame, app: &App) {
-    let size = frame.size();
-    let area = get_popup_area(size.width, size.height, 55, 28);
-
-    let block = Block::default()
-        .title("[OK] Import Complete")
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .style(Style::default().fg(Color::Green).bg(Color::Black));
-
-    let inner = block.inner(area);
-    frame.render_widget(Clear, area);
-    frame.render_widget(block, area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(2), Constraint::Length(1)])
-        .split(inner);
-
-    let para = Paragraph::new(app.success_message.as_str())
-        .wrap(Wrap { trim: true })
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::White));
-    frame.render_widget(para, chunks[0]);
-
-    let hint = Paragraph::new("Press Esc to dismiss")
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::DarkGray).italic());
-    frame.render_widget(hint, chunks[1]);
+    draw_message_popup(frame, "[OK] Import Complete", &app.success_message, Color::Green, 55, 28);
 }
-
 
 fn draw_help_overlay(frame: &mut ratatui::Frame, app: &App) {
     let size = frame.size();
-    let width = size.width.saturating_mul(3) / 4;
-    let height = size.height.saturating_mul(3) / 4;
-    let x = size.x + (size.width.saturating_sub(width)) / 2;
-    let y = size.y + (size.height.saturating_sub(height)) / 2;
-    let area = Rect { x, y, width, height };
-
+    let width = size.width * 3 / 4;
+    let height = size.height * 3 / 4;
+    let area = Rect { x: size.x + (size.width.saturating_sub(width)) / 2, y: size.y + (size.height.saturating_sub(height)) / 2, width, height };
     frame.render_widget(Clear, area);
-
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(5)])
-        .split(area);
-
-    let query_text = if app.help_search_query.is_empty() {
-        "Type to filter tips".to_string()
-    } else {
-        app.help_search_query.clone()
-    };
-
-    let input_label = "Quick Help (Esc to close)";
-    let input_widget = Paragraph::new(query_text)
-        .block(Block::default().title(input_label).borders(Borders::ALL))
-        .style(Style::default().fg(Color::White).bg(Color::DarkGray));
-    frame.render_widget(input_widget, layout[0]);
-
+    let layout = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(3), Constraint::Min(5)]).split(area);
+    let query_text = if app.help_search_query.is_empty() { "Type to filter tips".to_string() } else { app.help_search_query.clone() };
+    frame.render_widget(Paragraph::new(query_text).block(Block::default().title("Quick Help (Esc to close)").borders(Borders::ALL)).style(Style::default().fg(Color::White).bg(Color::DarkGray)), layout[0]);
     let query = app.help_search_query.to_lowercase();
-    let filtered: Vec<&HelpTopic> = HELP_TOPICS
-        .iter()
-        .filter(|topic| {
-            if query.trim().is_empty() {
-                return true;
-            }
-            topic.title.to_lowercase().contains(&query)
-                || topic.detail.to_lowercase().contains(&query)
-        })
-        .collect();
-
-    let mut lines: Vec<Line> = Vec::new();
-    for topic in filtered {
-        lines.push(Line::from(Span::styled(
-            topic.title,
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(topic.detail));
-        lines.push(Line::from(""));
-    }
-
-    if lines.is_empty() {
-        lines.push(Line::from(
-            "No tips match that search. Try words like 'flashcards', 'mouse', or 'bulk'.",
-        ));
-    } else {
-        lines.push(Line::from(
-            "Tip: Use Shift+Arrow in flashcards or double-click items for shortcuts.",
-        ));
-    }
-
-    let help_block = Paragraph::new(lines)
-        .block(Block::default().title("Tips (↑↓ or mouse wheel to scroll)").borders(Borders::ALL))
-        .wrap(Wrap { trim: false })
-        .scroll((app.help_scroll, 0))
-        .style(Style::default().fg(Color::White));
-    frame.render_widget(help_block, layout[1]);
+    let mut lines: Vec<Line> = HELP_TOPICS.iter().filter(|t| query.trim().is_empty() || t.title.to_lowercase().contains(&query) || t.detail.to_lowercase().contains(&query)).flat_map(|t| vec![Line::from(Span::styled(t.title, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))), Line::from(t.detail), Line::from("")]).collect();
+    lines.push(Line::from(if lines.is_empty() { "No tips match that search. Try words like 'flashcards', 'mouse', or 'bulk'." } else { "Tip: Use Shift+Arrow in flashcards or double-click items for shortcuts." }));
+    frame.render_widget(Paragraph::new(lines).block(Block::default().title("Tips (↑↓ or mouse wheel to scroll)").borders(Borders::ALL)).wrap(Wrap { trim: false }).scroll((app.help_scroll, 0)).style(Style::default().fg(Color::White)), layout[1]);
 }
 
 fn draw_spell_check_popup(frame: &mut ratatui::Frame, app: &App) {
     let size = frame.size();
     let area = get_popup_area(size.width, size.height, 70, 28);
-
     frame.render_widget(Clear, area);
-
-    let block = Block::default()
-        .title("Spell Check (Esc to close, Enter/1-9 replace, 'a' add word)")
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .style(Style::default().fg(Color::White).bg(Color::Black));
-    frame.render_widget(block.clone(), area);
-
+    let block = Block::default().title("Spell Check (Esc to close, Enter/1-9 replace, 'a' add word)").borders(Borders::ALL).border_type(BorderType::Rounded).style(Style::default().fg(Color::White).bg(Color::Black));
     let inner = block.inner(area);
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(5)])
-        .split(inner);
-
-    // Header info
-    let header = Paragraph::new(format!(
-        "{} potential issues found",
-        app.spell_check_results.len()
-    ))
-    .style(Style::default().fg(Color::Yellow))
-    .alignment(Alignment::Center);
-    frame.render_widget(header, layout[0]);
-
-    // Results list
-    let mut lines: Vec<Line> = Vec::new();
-    for (idx, res) in app.spell_check_results.iter().enumerate() {
-        let marker = if idx == app.spell_check_selected { ">" } else { " " };
-        let pos = format!("Ln {}, Col {}", res.line_number, res.column + 1);
-        let suggestions = if res.suggestions.is_empty() {
-            "(no suggestions)".to_string()
-        } else {
-            res.suggestions
-                .iter()
-                .take(5)
-                .enumerate()
-                .map(|(i, s)| format!("{}:{}", i + 1, s))
-                .collect::<Vec<_>>()
-                .join("  ")
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(marker, Style::default().fg(Color::Cyan)),
-            Span::raw(" "),
-            Span::styled(pos, Style::default().fg(Color::Gray)),
-            Span::raw("  "),
-            Span::styled(
-                res.word.as_str(),
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  →  "),
-            Span::styled(suggestions, Style::default().fg(Color::Green)),
-        ]));
-    }
-
+    frame.render_widget(block, area);
+    let layout = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(2), Constraint::Min(5)]).split(inner);
+    frame.render_widget(Paragraph::new(format!("{} potential issues found", app.spell_check_results.len())).style(Style::default().fg(Color::Yellow)).alignment(Alignment::Center), layout[0]);
+    let mut lines: Vec<Line> = app
+        .spell_check_results
+        .iter()
+        .enumerate()
+        .map(|(idx, res)| {
+            let marker = if idx == app.spell_check_selected { ">" } else { " " };
+            let suggestions = if res.suggestions.is_empty() { "(no suggestions)".to_string() } else { res.suggestions.iter().take(5).enumerate().map(|(i, s)| format!("{}:{}", i + 1, s)).collect::<Vec<_>>().join("  ") };
+            Line::from(vec![Span::styled(marker, Style::default().fg(Color::Cyan)), Span::raw(" "), Span::styled(format!("Ln {}, Col {}", res.line_number, res.column + 1), Style::default().fg(Color::Gray)), Span::raw("  "), Span::styled(res.word.as_str(), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)), Span::raw("  →  "), Span::styled(suggestions, Style::default().fg(Color::Green))])
+        })
+        .collect();
     if lines.is_empty() {
         lines.push(Line::from("No spelling issues found."));
     }
-
-    let list = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::NONE))
-        .wrap(Wrap { trim: false })
-        .scroll((app.spell_check_scroll, 0));
-    frame.render_widget(list, layout[1]);
+    frame.render_widget(Paragraph::new(lines).block(Block::default().borders(Borders::NONE)).wrap(Wrap { trim: false }).scroll((app.spell_check_scroll, 0)), layout[1]);
 }
-
-// Removed image overlay
-// fn draw_image_preview_overlay(_frame: &mut ratatui::Frame, _app: &App) {}
 
 fn draw_calendar_picker(frame: &mut ratatui::Frame, app: &mut App) {
     let size = frame.size();
     let width = 50.min(size.width.saturating_sub(4));
     let height = 20.min(size.height.saturating_sub(4));
-    let x = size.x + (size.width.saturating_sub(width)) / 2;
-    let y = size.y + (size.height.saturating_sub(height)) / 2;
-    let area = Rect { x, y, width, height };
-
+    let area = Rect { x: size.x + (size.width.saturating_sub(width)) / 2, y: size.y + (size.height.saturating_sub(height)) / 2, width, height };
     frame.render_widget(Clear, area);
-
-    let outer_block = Block::default()
-        .title("Select Date (Esc to cancel)")
-        .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Cyan).bg(Color::Black));
-    frame.render_widget(outer_block, area);
-
-    let inner_area = Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    };
-
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(10)])
-        .split(inner_area);
-
-    // Year/Month selector and help
-    let month_name = match app.calendar_month {
-        1 => "January",
-        2 => "February",
-        3 => "March",
-        4 => "April",
-        5 => "May",
-        6 => "June",
-        7 => "July",
-        8 => "August",
-        9 => "September",
-        10 => "October",
-        11 => "November",
-        12 => "December",
-        _ => "Unknown",
-    };
-    
-    let header_text = vec![
-        Line::from(vec![
-            Span::styled("◄ ", Style::default().fg(Color::Cyan)),
-            Span::styled(format!("{} {}", month_name, app.calendar_year), 
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::styled(" ►", Style::default().fg(Color::Cyan)),
-        ]),
-        Line::from(
-            Span::styled("←/→: month  ↑/↓: year  Click day to select", 
-                Style::default().fg(Color::Gray))
-        ),
-    ];
-
-    let year_month_widget = Paragraph::new(header_text)
-        .alignment(Alignment::Center);
-    frame.render_widget(year_month_widget, layout[0]);
-
-    // Calendar grid
-    let calendar_area = layout[1];
-    draw_calendar_grid(frame, app, calendar_area);
+    frame.render_widget(Block::default().title("Select Date (Esc to cancel)").borders(Borders::ALL).style(Style::default().fg(Color::Cyan).bg(Color::Black)), area);
+    let inner_area = Rect { x: area.x + 1, y: area.y + 1, width: area.width.saturating_sub(2), height: area.height.saturating_sub(2) };
+    let layout = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(4), Constraint::Min(10)]).split(inner_area);
+    const MONTHS: [&str; 13] = ["Unknown", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    let month_name = MONTHS.get(app.calendar_month as usize).copied().unwrap_or("Unknown");
+    frame.render_widget(Paragraph::new(vec![Line::from(vec![Span::styled("◄ ", Style::default().fg(Color::Cyan)), Span::styled(format!("{} {}", month_name, app.calendar_year), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)), Span::styled(" ►", Style::default().fg(Color::Cyan))]), Line::from(Span::styled("←/→: month  ↑/↓: year  Click day to select", Style::default().fg(Color::Gray)))]).alignment(Alignment::Center), layout[0]);
+    draw_calendar_grid(frame, app, layout[1]);
 }
 
 fn draw_calendar_grid(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     use chrono::Datelike;
-
     app.calendar_day_rects.clear();
-
     let first_day = match NaiveDate::from_ymd_opt(app.calendar_year, app.calendar_month, 1) {
         Some(d) => d,
         None => return,
     };
-
     let weekday_offset = first_day.weekday().num_days_from_monday() as usize;
     let days_in_month: u32 = match app.calendar_month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -5410,67 +3760,33 @@ fn draw_calendar_grid(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
         }
         _ => 30,
     };
-
-    let mut lines = Vec::new();
-    
-    // Header
-    lines.push(Line::from(vec![
-        Span::styled(" Mo ", Style::default().fg(Color::Cyan)),
-        Span::styled(" Tu ", Style::default().fg(Color::Cyan)),
-        Span::styled(" We ", Style::default().fg(Color::Cyan)),
-        Span::styled(" Th ", Style::default().fg(Color::Cyan)),
-        Span::styled(" Fr ", Style::default().fg(Color::Cyan)),
-        Span::styled(" Sa ", Style::default().fg(Color::Yellow)),
-        Span::styled(" Su ", Style::default().fg(Color::Yellow)),
-    ]));
-    lines.push(Line::from(""));
-
-    // Days
+    let mut lines = vec![Line::from(["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].iter().enumerate().map(|(i, d)| Span::styled(format!(" {} ", d), Style::default().fg(if i >= 5 { Color::Yellow } else { Color::Cyan }))).collect::<Vec<_>>()), Line::from("")];
     let mut day: u32 = 1;
-    let total_cells = weekday_offset + days_in_month as usize;
-    let rows = (total_cells + 6) / 7;
-
+    let rows = (weekday_offset + days_in_month as usize + 6) / 7;
+    let today = Local::now().date_naive();
     for week in 0..rows {
         let mut week_spans = Vec::new();
-        for day_of_week in 0..7 {
-            let cell_idx = week * 7 + day_of_week;
+        for dow in 0..7 {
+            let cell_idx = week * 7 + dow;
             if cell_idx < weekday_offset || day > days_in_month {
                 week_spans.push(Span::raw("    "));
             } else {
-                let is_today = if let Some(current_date) = NaiveDate::from_ymd_opt(app.calendar_year, app.calendar_month, day) {
-                    current_date == Local::now().date_naive()
-                } else {
-                    false
-                };
-                
+                let is_today = NaiveDate::from_ymd_opt(app.calendar_year, app.calendar_month, day).map(|d| d == today).unwrap_or(false);
                 let style = if is_today {
                     Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-                } else if day_of_week >= 5 {
+                } else if dow >= 5 {
                     Style::default().fg(Color::Yellow)
                 } else {
                     Style::default().fg(Color::White)
                 };
-                
-                // Track clickable area for this day
-                let day_rect = Rect {
-                    x: area.x + (day_of_week * 4) as u16,
-                    y: area.y + 2 + week as u16,
-                    width: 4,
-                    height: 1,
-                };
-                app.calendar_day_rects.push((day, day_rect));
-                
+                app.calendar_day_rects.push((day, Rect { x: area.x + (dow * 4) as u16, y: area.y + 2 + week as u16, width: 4, height: 1 }));
                 week_spans.push(Span::styled(format!(" {:2} ", day), style));
                 day += 1;
             }
         }
         lines.push(Line::from(week_spans));
     }
-
-    let calendar_widget = Paragraph::new(lines)
-        .block(Block::default())
-        .alignment(Alignment::Left);
-    frame.render_widget(calendar_widget, area);
+    frame.render_widget(Paragraph::new(lines).block(Block::default()).alignment(Alignment::Left), area);
 }
 
 fn textarea_lines_with_cursor(app: &App, height: u16) -> Vec<Line<'static>> {
@@ -5496,15 +3812,9 @@ fn textarea_lines_with_cursor(app: &App, height: u16) -> Vec<Line<'static>> {
             if char_col == line.chars().count() {
                 new_line.push('|');
             }
-            lines.push(Line::from(Span::styled(
-                new_line,
-                Style::default().fg(Color::Yellow).bg(Color::Rgb(30, 30, 40)),
-            )));
+            lines.push(Line::from(Span::styled(new_line, Style::default().fg(Color::Yellow).bg(Color::Rgb(30, 30, 40)))));
         } else if app.selection_all {
-            lines.push(Line::from(Span::styled(
-                line.clone(),
-                Style::default().bg(Color::DarkGray),
-            )));
+            lines.push(Line::from(Span::styled(line.clone(), Style::default().bg(Color::DarkGray))));
         } else {
             lines.push(Line::from(line.clone()));
         }
@@ -5519,21 +3829,16 @@ fn textarea_lines_with_cursor(app: &App, height: u16) -> Vec<Line<'static>> {
     }
 }
 
-fn render_textarea_editor(
-    frame: &mut ratatui::Frame,
-    app: &mut App,
-    area: Rect,
-    title: &str,
-) {
+fn render_textarea_editor(frame: &mut ratatui::Frame, app: &mut App, area: Rect, title: &str) {
     let inner_height = area.height.saturating_sub(2) as usize; // account for borders
     let lines_display = textarea_lines_with_cursor(app, inner_height as u16);
-    
+
     // Calculate scrollbar state based on total lines
     let total_lines = app.textarea.lines().len();
     let _max_scroll = total_lines.saturating_sub(inner_height);
-    
+
     let mut scrollbar_state = ScrollbarState::new(total_lines).position(app.textarea_scroll as usize);
-    
+
     // Create panel with scrollbar space reserved on the right
     let panel_area = Rect {
         x: area.x,
@@ -5541,30 +3846,15 @@ fn render_textarea_editor(
         width: area.width.saturating_sub(1), // Reserve space for scrollbar
         height: area.height,
     };
-    
-    let scrollbar_area = Rect {
-        x: area.x + area.width.saturating_sub(1),
-        y: area.y + 1,
-        width: 1,
-        height: area.height.saturating_sub(2),
-    };
-    
-    let panel = Paragraph::new(lines_display)
-        .block(Block::default().title(title).borders(Borders::ALL))
-        .wrap(Wrap { trim: false })
-        .style(Style::default().fg(Color::Yellow))
-        .scroll((app.textarea_scroll, 0));
+
+    let scrollbar_area = Rect { x: area.x + area.width.saturating_sub(1), y: area.y + 1, width: 1, height: area.height.saturating_sub(2) };
+
+    let panel = Paragraph::new(lines_display).block(Block::default().title(title).borders(Borders::ALL)).wrap(Wrap { trim: false }).style(Style::default().fg(Color::Yellow)).scroll((app.textarea_scroll, 0));
 
     frame.render_widget(panel, panel_area);
-    
+
     // Render scrollbar
-    frame.render_stateful_widget(
-        Scrollbar::default()
-            .orientation(ScrollbarOrientation::VerticalRight)
-            .style(Style::default().fg(Color::Gray)),
-        scrollbar_area,
-        &mut scrollbar_state,
-    );
+    frame.render_stateful_widget(Scrollbar::default().orientation(ScrollbarOrientation::VerticalRight).style(Style::default().fg(Color::Gray)), scrollbar_area, &mut scrollbar_state);
 }
 
 fn task_help_lines() -> Vec<Line<'static>> {
@@ -5628,17 +3918,11 @@ fn parse_task_matrix(text: &str) -> Option<TaskMatrix> {
     match lowered.as_str() {
         "do" | "urgent important" | "important urgent" | "ui" | "iu" => Some(TaskMatrix::Do),
         "high" => Some(TaskMatrix::Do),
-        "schedule" | "plan" | "important not urgent" | "not urgent important" | "inu" => {
-            Some(TaskMatrix::Schedule)
-        }
+        "schedule" | "plan" | "important not urgent" | "not urgent important" | "inu" => Some(TaskMatrix::Schedule),
         "medium" => Some(TaskMatrix::Schedule),
-        "delegate" | "urgent not important" | "not important urgent" | "uni" => {
-            Some(TaskMatrix::Delegate)
-        }
+        "delegate" | "urgent not important" | "not important urgent" | "uni" => Some(TaskMatrix::Delegate),
         "low" => Some(TaskMatrix::Delegate),
-        "eliminate" | "delete" | "drop" | "not urgent not important" | "not important not urgent" | "nuni" | "ninu" => {
-            Some(TaskMatrix::Eliminate)
-        }
+        "eliminate" | "delete" | "drop" | "not urgent not important" | "not important not urgent" | "nuni" | "ninu" => Some(TaskMatrix::Eliminate),
         _ => None,
     }
 }
@@ -5655,10 +3939,7 @@ fn parse_recurrence(text: &str) -> Recurrence {
             // "range 2025-01-01 to 2025-01-31 at 09:00"
             // "from 2025-01-01 to 2025-02-15 at 18:30"
             if lowered.starts_with("range") || lowered.starts_with("from") {
-                let cleaned = lowered
-                    .trim_start_matches("range")
-                    .trim_start_matches("from")
-                    .trim();
+                let cleaned = lowered.trim_start_matches("range").trim_start_matches("from").trim();
                 let parts: Vec<&str> = cleaned.split("to").map(|s| s.trim()).collect();
                 if parts.len() >= 2 {
                     let start_str = parts[0];
@@ -5672,10 +3953,7 @@ fn parse_recurrence(text: &str) -> Recurrence {
                         }
                     }
 
-                    if let (Ok(start), Ok(end)) = (
-                        NaiveDate::parse_from_str(start_str, "%Y-%m-%d"),
-                        NaiveDate::parse_from_str(end_part, "%Y-%m-%d"),
-                    ) {
+                    if let (Ok(start), Ok(end)) = (NaiveDate::parse_from_str(start_str, "%Y-%m-%d"), NaiveDate::parse_from_str(end_part, "%Y-%m-%d")) {
                         return Recurrence::Range { start, end, time };
                     }
                 }
@@ -5687,10 +3965,7 @@ fn parse_recurrence(text: &str) -> Recurrence {
 
 fn format_task_editor_content(task: &Task) -> String {
     let status = if task.completed { "Completed" } else { "Pending" };
-    let due = task
-        .due_date
-        .map(|d| d.to_string())
-        .unwrap_or_else(|| "Not set".to_string());
+    let due = task.due_date.map(|d| d.to_string()).unwrap_or_else(|| "Not set".to_string());
     let reminder = match (task.reminder_date, task.reminder_time, task.reminder_text.as_ref()) {
         (Some(d), Some(t), _) => format!("{} {}", d, t.format("%H:%M")),
         (Some(d), None, _) => d.to_string(),
@@ -5698,190 +3973,113 @@ fn format_task_editor_content(task: &Task) -> String {
         (None, _, None) => "None".to_string(),
     };
 
-    format!(
-        "Title: {}\nStatus: {}\nMatrix: {}\nCreated: {}\nDue: {}\nReminder: {}\nRepeat: {}\n\nDescription:\n{}",
-        task.title,
-        status,
-        task_matrix_label(task.matrix),
-        task.created_at,
-        due,
-        reminder,
-        recurrence_label(task.recurrence),
-        task.description
-    )
+    format!("Title: {}\nStatus: {}\nMatrix: {}\nCreated: {}\nDue: {}\nReminder: {}\nRepeat: {}\n\nDescription:\n{}", task.title, status, task_matrix_label(task.matrix), task.created_at, due, reminder, recurrence_label(task.recurrence), task.description)
 }
-
-// ============================================================================
-// TASK EDITOR - Templates, formatting, and parsing
-// ============================================================================
 
 fn new_task_editor_template() -> String {
     let today = Local::now().date_naive();
-    format!(
-        "Title: \nStatus: Pending (options: Pending|Completed)\nMatrix: Schedule (options: Do|Schedule|Delegate|Eliminate)\nCreated: {}\nDue: Not set\nReminder: None (e.g. 2025-12-25 09:30)\nRepeat: none (options: none|daily|weekly|monthly|range YYYY-MM-DD to YYYY-MM-DD at HH:MM)\n\nDescription:\n",
-        today
-    )
+    format!("Title: \nStatus: Pending (options: Pending|Completed)\nMatrix: Schedule (options: Do|Schedule|Delegate|Eliminate)\nCreated: {}\nDue: Not set\nReminder: None (e.g. 2025-12-25 09:30)\nRepeat: none (options: none|daily|weekly|monthly|range YYYY-MM-DD to YYYY-MM-DD at HH:MM)\n\nDescription:\n", today)
 }
 
 fn parse_task_editor_content(input: &str, existing: Option<&Task>, created_fallback: NaiveDate) -> Task {
     let mut task = existing.cloned().unwrap_or_else(|| Task::new(String::new(), String::new()));
-
     if existing.is_none() {
         task.created_at = created_fallback;
     }
-
-    let mut title: Option<String> = None;
-    let mut status: Option<bool> = None;
-    let mut matrix: Option<TaskMatrix> = None;
+    let (mut title, mut status, mut matrix, mut due, mut reminder_date, mut reminder_text): (Option<String>, Option<bool>, Option<TaskMatrix>, Option<NaiveDate>, Option<NaiveDate>, Option<String>) = (None, None, None, None, None, None);
     let mut created_at = task.created_at;
-    let mut due: Option<NaiveDate> = None;
-    let mut reminder_date: Option<NaiveDate> = None;
     let mut reminder_time: Option<NaiveTime> = task.reminder_time;
-    let mut reminder_text: Option<String> = None;
     let mut recurrence = task.recurrence;
-
     let mut description_lines: Vec<String> = Vec::new();
     let mut in_description = false;
-
+    let valid_date = |d: NaiveDate| {
+        let max = Local::now().date_naive() + chrono::Duration::days(3650);
+        let min = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        d >= min && d <= max
+    };
     for line in input.lines() {
         if in_description {
             description_lines.push(line.to_string());
             continue;
         }
-
         let trimmed = line.trim();
         let lower = trimmed.to_lowercase();
-
+        let after = || line.splitn(2, ':').nth(1).unwrap_or("").trim().to_string();
         if lower.starts_with("description:") {
-            let after = line.splitn(2, ':').nth(1).unwrap_or("").trim_start();
-            description_lines.push(after.to_string());
+            description_lines.push(line.splitn(2, ':').nth(1).unwrap_or("").trim_start().to_string());
             in_description = true;
-            continue;
-        }
-
-        if lower.starts_with("title:") {
-            let value = line.splitn(2, ':').nth(1).unwrap_or("").trim();
-            // Validate title length (max 200 characters)
-            if value.len() <= 200 {
-                title = Some(value.to_string());
+        } else if lower.starts_with("title:") {
+            let v = after();
+            if v.len() <= 200 {
+                title = Some(v);
             }
-            continue;
-        }
-
-        if lower.starts_with("status:") {
-            let after = line.splitn(2, ':').nth(1).unwrap_or("").trim().to_lowercase();
-            status = Some(after.contains("done") || after.contains("complete"));
-            continue;
-        }
-
-        if lower.starts_with("matrix:") || lower.starts_with("eisenhower:") || lower.starts_with("quadrant:") {
-            let after = line.splitn(2, ':').nth(1).unwrap_or("").trim();
-            matrix = parse_task_matrix(after);
-            continue;
-        }
-        if lower.starts_with("priority:") {
-            let after = line.splitn(2, ':').nth(1).unwrap_or("").trim().to_lowercase();
-            matrix = match after.as_str() {
+        } else if lower.starts_with("status:") {
+            let a = after().to_lowercase();
+            status = Some(a.contains("done") || a.contains("complete"));
+        } else if lower.starts_with("matrix:") || lower.starts_with("eisenhower:") || lower.starts_with("quadrant:") {
+            matrix = parse_task_matrix(&after());
+        } else if lower.starts_with("priority:") {
+            matrix = match after().to_lowercase().as_str() {
                 "high" => Some(TaskMatrix::Do),
                 "medium" => Some(TaskMatrix::Schedule),
                 "low" => Some(TaskMatrix::Delegate),
                 _ => None,
             };
-            continue;
-        }
-
-        if lower.starts_with("created:") {
-            if let Some(val) = line.splitn(2, ':').nth(1) {
-                if let Ok(d) = NaiveDate::parse_from_str(val.trim(), "%Y-%m-%d") {
-                    // Validate date is reasonable
-                    let max_date = Local::now().date_naive() + chrono::Duration::days(3650);
-                    let min_date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-                    if d >= min_date && d <= max_date {
-                        created_at = d;
-                    }
+        } else if lower.starts_with("created:") {
+            if let Ok(d) = NaiveDate::parse_from_str(&after(), "%Y-%m-%d") {
+                if valid_date(d) {
+                    created_at = d;
                 }
             }
-            continue;
-        }
-
-        if lower.starts_with("due:") {
-            let after = line.splitn(2, ':').nth(1).unwrap_or("").trim();
-            if after.eq_ignore_ascii_case("not set") || after.is_empty() {
+        } else if lower.starts_with("due:") {
+            let a = after();
+            if a.eq_ignore_ascii_case("not set") || a.is_empty() {
                 due = None;
-            } else if let Ok(d) = NaiveDate::parse_from_str(after, "%Y-%m-%d") {
-                // Validate date is reasonable
-                let max_date = Local::now().date_naive() + chrono::Duration::days(3650);
-                let min_date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-                if d >= min_date && d <= max_date {
+            } else if let Ok(d) = NaiveDate::parse_from_str(&a, "%Y-%m-%d") {
+                if valid_date(d) {
                     due = Some(d);
                 }
             }
-            continue;
-        }
-
-        if lower.starts_with("reminder:") {
-            let after = line.splitn(2, ':').nth(1).unwrap_or("").trim();
-            if after.eq_ignore_ascii_case("none") || after.is_empty() || after.eq_ignore_ascii_case("not set") {
+        } else if lower.starts_with("reminder:") {
+            let a = after();
+            if a.eq_ignore_ascii_case("none") || a.is_empty() || a.eq_ignore_ascii_case("not set") {
                 reminder_date = None;
                 reminder_time = None;
                 reminder_text = None;
             } else {
-                // Expect formats: "YYYY-MM-DD" or "YYYY-MM-DD HH:MM"; otherwise treat as text
-                let mut parts = after.split_whitespace();
+                let mut parts = a.split_whitespace();
                 let date_part = parts.next();
                 let time_part = parts.next();
-
-                if let Some(date_str) = date_part {
-                    if let Ok(d) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-                        let today = Local::now().date_naive();
-                        // Validate date is reasonable
-                        let max_date = today + chrono::Duration::days(3650);
-                        let min_date = today;
-                        if d >= min_date && d <= max_date {
+                let today = Local::now().date_naive();
+                let mut parsed = false;
+                if let Some(ds) = date_part {
+                    if let Ok(d) = NaiveDate::parse_from_str(ds, "%Y-%m-%d") {
+                        if d >= today && d <= today + chrono::Duration::days(3650) {
                             reminder_date = Some(d);
-                            if let Some(t_str) = time_part {
-                                if let Ok(t) = NaiveTime::parse_from_str(t_str, "%H:%M") {
+                            if let Some(ts) = time_part {
+                                if let Ok(t) = NaiveTime::parse_from_str(ts, "%H:%M") {
                                     reminder_time = Some(t);
                                 }
                             }
                             reminder_text = None;
-                            continue;
+                            parsed = true;
                         }
                     }
                 }
-
-                // Fallback to free text
-                reminder_text = Some(after.to_string());
-                reminder_date = None;
-                reminder_time = None;
+                if !parsed {
+                    reminder_text = Some(a);
+                    reminder_date = None;
+                    reminder_time = None;
+                }
             }
-            continue;
-        }
-
-        if lower.starts_with("repeat:") {
-            let after = line.splitn(2, ':').nth(1).unwrap_or("").trim();
-            recurrence = parse_recurrence(after);
-            continue;
-        }
-
-        // Fallback: first non-empty line becomes title if not set yet
-        if title.is_none() && !trimmed.is_empty() {
-            // Validate title length (max 200 characters)
-            if trimmed.len() <= 200 {
-                title = Some(trimmed.to_string());
-            }
+        } else if lower.starts_with("repeat:") {
+            recurrence = parse_recurrence(&after());
+        } else if title.is_none() && !trimmed.is_empty() && trimmed.len() <= 200 {
+            title = Some(trimmed.to_string());
         }
     }
-
     let description = description_lines.join("\n").trim_start_matches('\n').to_string();
-    // Validate description length (max 10,000 characters)
-    let validated_description = if description.len() <= 10_000 {
-        description
-    } else {
-        // Truncate if too long
-        description.chars().take(10_000).collect()
-    };
-
+    let validated_description = if description.len() <= 10_000 { description } else { description.chars().take(10_000).collect() };
     if let Some(t) = title {
         if !t.is_empty() {
             task.title = t;
@@ -5900,17 +4098,11 @@ fn parse_task_editor_content(input: &str, existing: Option<&Task>, created_fallb
     task.reminder_time = reminder_time;
     task.recurrence = recurrence;
     task.description = validated_description;
-
     if task.title.trim().is_empty() {
         task.title = "Untitled Task".to_string();
     }
-
     task
 }
-
-// ============================================================================
-// TASK VALIDATORS - Parameter validation with clear error messages
-// ============================================================================
 
 fn validate_task_status(text: &str) -> Result<bool, String> {
     match text.trim().to_lowercase().as_str() {
@@ -5921,9 +4113,7 @@ fn validate_task_status(text: &str) -> Result<bool, String> {
 }
 
 fn validate_task_matrix(text: &str) -> Result<TaskMatrix, String> {
-    parse_task_matrix(text).ok_or_else(|| {
-        "Invalid Matrix. Valid options: Do|Schedule|Delegate|Eliminate".to_string()
-    })
+    parse_task_matrix(text).ok_or_else(|| "Invalid Matrix. Valid options: Do|Schedule|Delegate|Eliminate".to_string())
 }
 
 fn validate_task_recurrence(text: &str) -> Result<Recurrence, String> {
@@ -5984,10 +4174,6 @@ fn parse_habit_status(text: &str) -> HabitStatus {
     }
 }
 
-// ============================================================================
-// VALIDATORS - Consolidated parameter validation with clear error messages
-// ============================================================================
-
 fn validate_frequency(text: &str) -> Result<Recurrence, String> {
     let trimmed = text.trim().to_lowercase();
     match trimmed.as_str() {
@@ -6002,9 +4188,7 @@ fn validate_frequency(text: &str) -> Result<Recurrence, String> {
                 Ok(rec)
             }
         }
-        _ => Err(format!(
-            "Invalid Frequency. Valid options: daily|weekly|monthly|range YYYY-MM-DD to YYYY-MM-DD at HH:MM"
-        )),
+        _ => Err(format!("Invalid Frequency. Valid options: daily|weekly|monthly|range YYYY-MM-DD to YYYY-MM-DD at HH:MM")),
     }
 }
 
@@ -6016,33 +4200,15 @@ fn validate_habit_status(text: &str) -> Result<HabitStatus, String> {
     }
 }
 
-// ============================================================================
-// HABIT EDITOR - Templates, formatting, and parsing
-// ============================================================================
-
 fn new_habit_editor_template(selected_date: NaiveDate) -> String {
-    format!(
-        "Name: \nFrequency: daily (options: daily|weekly|monthly|range YYYY-MM-DD to YYYY-MM-DD at HH:MM)\nStatus: Active (options: Active|Paused)\nStart Date: {}\nNotes:\n",
-        selected_date
-    )
+    format!("Name: \nFrequency: daily (options: daily|weekly|monthly|range YYYY-MM-DD to YYYY-MM-DD at HH:MM)\nStatus: Active (options: Active|Paused)\nStart Date: {}\nNotes:\n", selected_date)
 }
 
 fn format_habit_editor_content(habit: &Habit) -> String {
-    format!(
-        "Name: {}\nFrequency: {}\nStatus: {}\nStart Date: {}\nNotes:\n{}",
-        habit.name,
-        recurrence_label(habit.frequency),
-        habit_status_label(habit.status),
-        habit.start_date,
-        habit.notes
-    )
+    format!("Name: {}\nFrequency: {}\nStatus: {}\nStart Date: {}\nNotes:\n{}", habit.name, recurrence_label(habit.frequency), habit_status_label(habit.status), habit.start_date, habit.notes)
 }
 
-fn parse_habit_editor_content(
-    input: &str,
-    existing: Option<&Habit>,
-    default_start_date: NaiveDate,
-) -> Option<Habit> {
+fn parse_habit_editor_content(input: &str, existing: Option<&Habit>, default_start_date: NaiveDate) -> Option<Habit> {
     let mut habit = existing.cloned().unwrap_or_else(|| Habit::new(String::new()));
     if existing.is_none() {
         habit.start_date = default_start_date;
@@ -6136,11 +4302,7 @@ fn parse_habit_editor_content(
         let body = notes_lines.join("\n");
         let notes_text = body.trim_end_matches('\n').to_string();
         // Validate notes length (max 10,000 characters)
-        habit.notes = if notes_text.len() <= 10_000 {
-            notes_text
-        } else {
-            notes_text.chars().take(10_000).collect()
-        };
+        habit.notes = if notes_text.len() <= 10_000 { notes_text } else { notes_text.chars().take(10_000).collect() };
     }
 
     if habit.name.trim().is_empty() {
@@ -6150,11 +4312,7 @@ fn parse_habit_editor_content(
     Some(habit)
 }
 
-fn parse_and_validate_habit(
-    input: &str,
-    existing: Option<&Habit>,
-    default_start_date: NaiveDate,
-) -> Result<Habit, String> {
+fn parse_and_validate_habit(input: &str, existing: Option<&Habit>, default_start_date: NaiveDate) -> Result<Habit, String> {
     // First pass: basic parsing
     let mut temp_habit = existing.cloned().unwrap_or_else(|| Habit::new(String::new()));
     if existing.is_none() {
@@ -6203,9 +4361,7 @@ fn parse_and_validate_habit(
     }
 
     // Parse the rest normally
-    let parsed = parse_habit_editor_content(input, existing, default_start_date).ok_or(
-        "Invalid habit: missing required fields".to_string(),
-    )?;
+    let parsed = parse_habit_editor_content(input, existing, default_start_date).ok_or("Invalid habit: missing required fields".to_string())?;
 
     Ok(parsed)
 }
@@ -6229,11 +4385,7 @@ fn parse_and_validate_task(input: &str, existing: Option<&Task>) -> Result<Task,
             }
         }
 
-        if let Some(rest) = trimmed
-            .strip_prefix("Matrix:")
-            .or_else(|| trimmed.strip_prefix("Eisenhower:"))
-            .or_else(|| trimmed.strip_prefix("Quadrant:"))
-        {
+        if let Some(rest) = trimmed.strip_prefix("Matrix:").or_else(|| trimmed.strip_prefix("Eisenhower:")).or_else(|| trimmed.strip_prefix("Quadrant:")) {
             let value = rest.trim().split(" (options:").next().unwrap_or("").trim();
             if !value.is_empty() {
                 matrix_value = Some(value.to_string());
@@ -6295,30 +4447,15 @@ fn parse_and_validate_task(input: &str, existing: Option<&Task>) -> Result<Task,
 }
 
 fn new_finance_editor_template(selected_date: NaiveDate) -> String {
-    format!(
-        "Category: \nAmount: \nDate: {}\nNotes:\n",
-        selected_date
-    )
+    format!("Category: \nAmount: \nDate: {}\nNotes:\n", selected_date)
 }
 
 fn format_finance_editor_content(entry: &FinanceEntry) -> String {
-    format!(
-        "Category: {}\nAmount: {:.2}\nDate: {}\nNotes:\n{}",
-        entry.category, entry.amount, entry.date, entry.note
-    )
+    format!("Category: {}\nAmount: {:.2}\nDate: {}\nNotes:\n{}", entry.category, entry.amount, entry.date, entry.note)
 }
 
-fn parse_finance_editor_content(
-    input: &str,
-    existing: Option<&FinanceEntry>,
-    default_date: NaiveDate,
-) -> Option<FinanceEntry> {
-    let mut entry = existing.cloned().unwrap_or_else(|| FinanceEntry::new(
-        default_date,
-        String::new(),
-        String::new(),
-        0.0,
-    ));
+fn parse_finance_editor_content(input: &str, existing: Option<&FinanceEntry>, default_date: NaiveDate) -> Option<FinanceEntry> {
+    let mut entry = existing.cloned().unwrap_or_else(|| FinanceEntry::new(default_date, String::new(), String::new(), 0.0));
     if existing.is_none() {
         entry.date = default_date;
     }
@@ -6402,11 +4539,7 @@ fn parse_finance_editor_content(
         let body = notes_lines.join("\n");
         let notes_text = body.trim_end_matches('\n').to_string();
         // Validate notes length (max 10,000 characters)
-        entry.note = if notes_text.len() <= 10_000 {
-            notes_text
-        } else {
-            notes_text.chars().take(10_000).collect()
-        };
+        entry.note = if notes_text.len() <= 10_000 { notes_text } else { notes_text.chars().take(10_000).collect() };
     }
 
     if let Some(cat) = category {
@@ -6425,30 +4558,15 @@ fn parse_finance_editor_content(
 }
 
 fn new_calorie_editor_template(selected_date: NaiveDate) -> String {
-    format!(
-        "Meal: \nCalories: \nDate: {}\nNotes:\n",
-        selected_date
-    )
+    format!("Meal: \nCalories: \nDate: {}\nNotes:\n", selected_date)
 }
 
 fn format_calorie_editor_content(entry: &CalorieEntry) -> String {
-    format!(
-        "Meal: {}\nCalories: {}\nDate: {}\nNotes:\n{}",
-        entry.meal, entry.calories, entry.date, entry.note
-    )
+    format!("Meal: {}\nCalories: {}\nDate: {}\nNotes:\n{}", entry.meal, entry.calories, entry.date, entry.note)
 }
 
-fn parse_calorie_editor_content(
-    input: &str,
-    existing: Option<&CalorieEntry>,
-    default_date: NaiveDate,
-) -> Option<CalorieEntry> {
-    let mut entry = existing.cloned().unwrap_or_else(|| CalorieEntry::new(
-        default_date,
-        String::new(),
-        String::new(),
-        0,
-    ));
+fn parse_calorie_editor_content(input: &str, existing: Option<&CalorieEntry>, default_date: NaiveDate) -> Option<CalorieEntry> {
+    let mut entry = existing.cloned().unwrap_or_else(|| CalorieEntry::new(default_date, String::new(), String::new(), 0));
     if existing.is_none() {
         entry.date = default_date;
     }
@@ -6532,11 +4650,7 @@ fn parse_calorie_editor_content(
         let body = notes_lines.join("\n");
         let notes_text = body.trim_end_matches('\n').to_string();
         // Validate notes length (max 10,000 characters)
-        entry.note = if notes_text.len() <= 10_000 {
-            notes_text
-        } else {
-            notes_text.chars().take(10_000).collect()
-        };
+        entry.note = if notes_text.len() <= 10_000 { notes_text } else { notes_text.chars().take(10_000).collect() };
     }
 
     if let Some(m) = meal {
@@ -6555,28 +4669,16 @@ fn parse_calorie_editor_content(
 }
 
 fn new_kanban_editor_template() -> String {
-    "Title: \nMatrix: Schedule (options: Do|Schedule|Delegate|Eliminate)\nDue: Not set\nNote:\n"
-        .to_string()
+    "Title: \nMatrix: Schedule (options: Do|Schedule|Delegate|Eliminate)\nDue: Not set\nNote:\n".to_string()
 }
 
 fn format_kanban_editor_content(card: &KanbanCard) -> String {
-    let due = card
-        .due_date
-        .map(|d| d.to_string())
-        .unwrap_or_else(|| "Not set".to_string());
-    format!(
-        "Title: {}\nMatrix: {}\nDue: {}\nNote:\n{}",
-        card.title,
-        task_matrix_label(card.matrix),
-        due,
-        card.note
-    )
+    let due = card.due_date.map(|d| d.to_string()).unwrap_or_else(|| "Not set".to_string());
+    format!("Title: {}\nMatrix: {}\nDue: {}\nNote:\n{}", card.title, task_matrix_label(card.matrix), due, card.note)
 }
 
 fn parse_kanban_editor_content(input: &str, existing: Option<&KanbanCard>) -> Option<KanbanCard> {
-    let mut card = existing.cloned().unwrap_or_else(|| {
-        KanbanCard::new(String::new(), String::new())
-    });
+    let mut card = existing.cloned().unwrap_or_else(|| KanbanCard::new(String::new(), String::new()));
     card.note.clear();
 
     let mut title: Option<String> = None;
@@ -6609,10 +4711,7 @@ fn parse_kanban_editor_content(input: &str, existing: Option<&KanbanCard>) -> Op
             continue;
         }
 
-        if let Some(rest) = trimmed.strip_prefix("Matrix:")
-            .or_else(|| trimmed.strip_prefix("Eisenhower:"))
-            .or_else(|| trimmed.strip_prefix("Quadrant:"))
-        {
+        if let Some(rest) = trimmed.strip_prefix("Matrix:").or_else(|| trimmed.strip_prefix("Eisenhower:")).or_else(|| trimmed.strip_prefix("Quadrant:")) {
             let value = rest.trim();
             if !value.is_empty() {
                 matrix = parse_task_matrix(value);
@@ -6646,11 +4745,7 @@ fn parse_kanban_editor_content(input: &str, existing: Option<&KanbanCard>) -> Op
         let body = note_lines.join("\n");
         let notes_text = body.trim_end_matches('\n').to_string();
         // Validate note length (max 10,000 characters)
-        card.note = if notes_text.len() <= 10_000 {
-            notes_text
-        } else {
-            notes_text.chars().take(10_000).collect()
-        };
+        card.note = if notes_text.len() <= 10_000 { notes_text } else { notes_text.chars().take(10_000).collect() };
     }
 
     if let Some(t) = title {
@@ -6684,11 +4779,7 @@ fn format_card_editor_content(card: &Card) -> String {
 }
 
 fn parse_card_editor_content_structured(input: &str, existing: Option<&Card>) -> Option<Card> {
-    let mut card = existing.cloned().unwrap_or_else(|| Card::new(
-        String::new(),
-        String::new(),
-        CardType::Basic,
-    ));
+    let mut card = existing.cloned().unwrap_or_else(|| Card::new(String::new(), String::new(), CardType::Basic));
 
     let mut front: Option<String> = None;
     let mut back: Option<String> = None;
@@ -6821,10 +4912,7 @@ fn calorie_help_lines() -> Vec<Line<'static>> {
 }
 
 fn draw_planner_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(5)])
-        .split(area);
+    let chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(3), Constraint::Min(5)]).split(area);
 
     draw_planner_header(frame, app, chunks[0]);
 
@@ -6835,82 +4923,39 @@ fn draw_planner_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_planner_header(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
-    let list_style = if matches!(app.planner_view, PlannerView::List) {
-        Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Cyan)
-    };
-
-    let matrix_style = if matches!(app.planner_view, PlannerView::Matrix) {
-        Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Yellow)
-    };
-
-    let list_btn = Paragraph::new("List")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(list_style);
+    let chunks = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(50); 2]).split(area);
+    let active = Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD);
+    let list_style = if matches!(app.planner_view, PlannerView::List) { active } else { Style::default().fg(Color::Cyan) };
+    let matrix_style = if matches!(app.planner_view, PlannerView::Matrix) { active } else { Style::default().fg(Color::Yellow) };
+    let mk = |label: &str, style| Paragraph::new(label.to_string()).block(Block::default().borders(Borders::ALL)).alignment(Alignment::Center).style(style);
     app.planner_list_btn = chunks[0];
-    frame.render_widget(list_btn, chunks[0]);
-
-    let matrix_btn = Paragraph::new("Eisenhower Matrix")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(matrix_style);
+    frame.render_widget(mk("List", list_style), chunks[0]);
     app.planner_matrix_btn = chunks[1];
-    frame.render_widget(matrix_btn, chunks[1]);
+    frame.render_widget(mk("Eisenhower Matrix", matrix_style), chunks[1]);
 }
 
 fn draw_planner_list_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(area);
-
-    // Task list panel
+    let chunks = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(40), Constraint::Percentage(60)]).split(area);
     draw_task_list(frame, app, chunks[0]);
-
-    // Task details / add panel
     draw_task_details(frame, app, chunks[1]);
 }
 
 fn draw_planner_matrix_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-        .split(area);
+    let chunks = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(65), Constraint::Percentage(35)]).split(area);
 
     draw_matrix_panel(frame, app, chunks[0]);
     draw_task_details(frame, app, chunks[1]);
 }
 
 fn draw_matrix_panel(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(5), Constraint::Length(3)])
-        .split(area);
-
+    let chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(7), Constraint::Min(5), Constraint::Length(3)]).split(area);
     draw_schedule_focus_list(frame, app, chunks[0]);
     draw_matrix_grid(frame, app, chunks[1]);
     draw_matrix_assign_buttons(frame, app, chunks[2]);
 }
 
 fn draw_schedule_focus_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let mut items = Vec::new();
     app.matrix_items.clear();
-
     let today = Local::now().date_naive();
     let focus_items = app
         .tasks
@@ -6920,197 +4965,96 @@ fn draw_schedule_focus_list(frame: &mut ratatui::Frame, app: &mut App, area: Rec
         .map(|(idx, task)| {
             let due = task.due_date.map(|d| d.to_string()).unwrap_or_else(|| "No date".to_string());
             let today_flag = if task.due_date == Some(today) { " • Today" } else { "" };
-            let text = format!("{}{}", task.title, format!(" ({}){}", due, today_flag));
-            (idx, text, task.completed)
+            (idx, format!("{} ({}){}", task.title, due, today_flag), task.completed)
         })
         .collect::<Vec<_>>();
-
-    items.extend(build_list_items(
-        focus_items,
-        app.current_task_idx,
-        area,
-        &mut app.matrix_items,
-    ));
-
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .title("Schedule Focus (Today + Planned)")
-                .borders(Borders::ALL),
-        )
-        .style(Style::default().fg(Color::White));
-    frame.render_widget(list, area);
+    let items = build_list_items(focus_items, app.current_task_idx, area, &mut app.matrix_items);
+    frame.render_widget(List::new(items).block(Block::default().title("Schedule Focus (Today + Planned)").borders(Borders::ALL)).style(Style::default().fg(Color::White)), area);
 }
 
 fn draw_matrix_grid(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
-    let top = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(rows[0]);
-
-    let bottom = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(rows[1]);
-
-    draw_matrix_quadrant(frame, app, top[0], TaskMatrix::Do, "Do (Urgent + Important)");
-    draw_matrix_quadrant(frame, app, top[1], TaskMatrix::Schedule, "Schedule (Important + Not Urgent)");
-    draw_matrix_quadrant(frame, app, bottom[0], TaskMatrix::Delegate, "Delegate (Urgent + Not Important)");
-    draw_matrix_quadrant(frame, app, bottom[1], TaskMatrix::Eliminate, "Eliminate (Not Urgent + Not Important)");
+    let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Percentage(50); 2]).split(area);
+    let top = split_equal_horizontal(rows[0], 2);
+    let bottom = split_equal_horizontal(rows[1], 2);
+    for (area, m, t) in [(top[0], TaskMatrix::Do, "Do (Urgent + Important)"), (top[1], TaskMatrix::Schedule, "Schedule (Important + Not Urgent)"), (bottom[0], TaskMatrix::Delegate, "Delegate (Urgent + Not Important)"), (bottom[1], TaskMatrix::Eliminate, "Eliminate (Not Urgent + Not Important)")] {
+        draw_matrix_quadrant(frame, app, area, m, t);
+    }
 }
 
-fn draw_matrix_quadrant(
-    frame: &mut ratatui::Frame,
-    app: &mut App,
-    area: Rect,
-    matrix: TaskMatrix,
-    title: &str,
-) {
+fn draw_matrix_quadrant(frame: &mut ratatui::Frame, app: &mut App, area: Rect, matrix: TaskMatrix, title: &str) {
     let items_iter = app
         .tasks
         .iter()
         .enumerate()
         .filter(|(_, task)| task.matrix == matrix)
         .map(|(idx, task)| {
-            let title_first_line = task.title.lines().next().unwrap_or(&task.title);
-            let due_str = task
-                .due_date
-                .map(|d| format!(" ({})", d))
-                .unwrap_or_default();
-            let text = format!("{}{}", title_first_line, due_str);
-            (idx, text, task.completed)
+            let first = task.title.lines().next().unwrap_or(&task.title);
+            let due_str = task.due_date.map(|d| format!(" ({})", d)).unwrap_or_default();
+            (idx, format!("{}{}", first, due_str), task.completed)
         })
         .collect::<Vec<_>>();
-
     let items = build_list_items(items_iter, app.current_task_idx, area, &mut app.matrix_items);
-    let list = List::new(items)
-        .block(Block::default().title(title).borders(Borders::ALL))
-        .style(Style::default().fg(Color::White));
-    frame.render_widget(list, area);
+    frame.render_widget(List::new(items).block(Block::default().title(title).borders(Borders::ALL)).style(Style::default().fg(Color::White)), area);
 }
 
 fn draw_matrix_assign_buttons(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let chunks = split_equal_horizontal(area, 4);
-
     app.matrix_do_btn = chunks[0];
     render_button(frame, "Assign Do", chunks[0], Color::Red);
-
     app.matrix_schedule_btn = chunks[1];
     render_button(frame, "Assign Schedule", chunks[1], Color::Yellow);
-
     app.matrix_delegate_btn = chunks[2];
     render_button(frame, "Assign Delegate", chunks[2], Color::Cyan);
-
     app.matrix_eliminate_btn = chunks[3];
     render_button(frame, "Assign Eliminate", chunks[3], Color::Gray);
 }
 
 fn draw_task_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(3)])
-        .split(area);
-
+    let chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(5), Constraint::Length(3)]).split(area);
     app.task_items.clear();
-
-    let editing_tasks =
-        app.is_editing() && matches!(app.edit_target, EditTarget::TaskTitle | EditTarget::TaskDetails);
-
-    // Show help message if no tasks and not currently editing a task
+    let editing_tasks = app.is_editing() && matches!(app.edit_target, EditTarget::TaskTitle | EditTarget::TaskDetails);
     if app.tasks.is_empty() && !editing_tasks {
-        let help_block = Block::default().title("Tasks").borders(Borders::ALL);
-        let help_para = Paragraph::new(task_help_lines())
-            .block(help_block)
-            .style(Style::default().fg(Color::Gray));
-        frame.render_widget(help_para, chunks[0]);
+        frame.render_widget(Paragraph::new(task_help_lines()).block(Block::default().title("Tasks").borders(Borders::ALL)).style(Style::default().fg(Color::Gray)), chunks[0]);
     } else {
-        // Build list items using helper
-        let list_data = app.tasks.iter().enumerate().map(|(idx, task)| {
-            let checkbox = if task.completed { "[x]" } else { "[ ]" };
-            let matrix_icon = match task.matrix {
-                TaskMatrix::Do => "(Do)",
-                TaskMatrix::Schedule => "(Sched)",
-                TaskMatrix::Delegate => "(Del)",
-                TaskMatrix::Eliminate => "(Elim)",
-            };
-            let title_first_line = task.title.lines().next().unwrap_or(&task.title);
-            let due_str = if let Some(due) = task.due_date {
-                format!(" ({})", due)
-            } else {
-                String::new()
-            };
-            let reminder_icon = if task.reminder_date.is_some() || task.reminder_text.is_some() {
-                " Reminder"
-            } else {
-                ""
-            };
-            let text = format!(
-                "{} {} {}{}{}",
-                checkbox, matrix_icon, title_first_line, due_str, reminder_icon
-            );
-            (idx, text, task.completed)
-        });
-
-        let items = build_list_items(
-            list_data.collect(),
-            app.current_task_idx,
-            chunks[0],
-            &mut app.task_items,
-        );
-
-        let task_list = List::new(items).block(
-            Block::default()
-                .title("Tasks (Middle-click: toggle [check], Right-click: delete)")
-                .borders(Borders::ALL),
-        );
-        frame.render_widget(task_list, chunks[0]);
+        let list_data: Vec<_> = app
+            .tasks
+            .iter()
+            .enumerate()
+            .map(|(idx, task)| {
+                let checkbox = if task.completed { "[x]" } else { "[ ]" };
+                let matrix_icon = match task.matrix {
+                    TaskMatrix::Do => "(Do)",
+                    TaskMatrix::Schedule => "(Sched)",
+                    TaskMatrix::Delegate => "(Del)",
+                    TaskMatrix::Eliminate => "(Elim)",
+                };
+                let title_first = task.title.lines().next().unwrap_or(&task.title);
+                let due_str = task.due_date.map(|d| format!(" ({})", d)).unwrap_or_default();
+                let reminder = if task.reminder_date.is_some() || task.reminder_text.is_some() { " Reminder" } else { "" };
+                (idx, format!("{} {} {}{}{}", checkbox, matrix_icon, title_first, due_str, reminder), task.completed)
+            })
+            .collect();
+        let items = build_list_items(list_data, app.current_task_idx, chunks[0], &mut app.task_items);
+        frame.render_widget(List::new(items).block(Block::default().title("Tasks (Middle-click: toggle [check], Right-click: delete)").borders(Borders::ALL)), chunks[0]);
     }
-
-    // Add task button
     render_button(frame, "New Task", chunks[1], Color::Green);
     app.add_task_btn = chunks[1];
 }
 
 fn draw_task_details(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(3)])
-        .split(area);
-
-    let editing_tasks =
-        app.is_editing() && matches!(app.edit_target, EditTarget::TaskTitle | EditTarget::TaskDetails);
-
+    let chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(5), Constraint::Length(3)]).split(area);
+    let editing_tasks = app.is_editing() && matches!(app.edit_target, EditTarget::TaskTitle | EditTarget::TaskDetails);
     if editing_tasks {
-        let title = if matches!(app.edit_target, EditTarget::TaskTitle) {
-            "New Task - First line: title, rest: details (Ctrl+S to save, Esc to cancel)"
+        let title = if matches!(app.edit_target, EditTarget::TaskTitle) { "New Task - First line: title, rest: details (Ctrl+S to save, Esc to cancel)" } else { "Edit Task - First line: title, rest: details (Ctrl+S to save, Esc to cancel)" };
+        let target_area = if app.editing_input.trim().is_empty() {
+            let hl = Layout::default().direction(Direction::Vertical).constraints([Constraint::Percentage(45), Constraint::Percentage(55)]).split(chunks[0]);
+            frame.render_widget(Paragraph::new(task_help_lines()).block(Block::default().title("How to use").borders(Borders::ALL)).wrap(Wrap { trim: false }).style(Style::default().fg(Color::Gray)), hl[0]);
+            hl[1]
         } else {
-            "Edit Task - First line: title, rest: details (Ctrl+S to save, Esc to cancel)"
+            chunks[0]
         };
-
-        let show_help = app.editing_input.trim().is_empty();
-        if show_help {
-            let help_layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-                .split(chunks[0]);
-
-            let help_panel = Paragraph::new(task_help_lines())
-                .block(Block::default().title("How to use").borders(Borders::ALL))
-                .wrap(Wrap { trim: false })
-                .style(Style::default().fg(Color::Gray));
-            frame.render_widget(help_panel, help_layout[0]);
-
-            app.content_edit_area = help_layout[1];
-            render_textarea_editor(frame, app, help_layout[1], title);
-        } else {
-            app.content_edit_area = chunks[0];
-            render_textarea_editor(frame, app, chunks[0], title);
-        }
+        app.content_edit_area = target_area;
+        render_textarea_editor(frame, app, target_area, title);
     } else if let Some(task) = app.tasks.get(app.current_task_idx) {
         let reminder_line = match (task.reminder_date, task.reminder_time, task.reminder_text.clone()) {
             (Some(d), Some(t), _) => format!("\nReminder: {} {}", d, t.format("%H:%M")),
@@ -7120,158 +5064,53 @@ fn draw_task_details(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
             (None, None, None) => String::new(),
         };
         let rec_label = recurrence_label(task.recurrence);
-        let recurrence_line = if rec_label == "None" {
-            String::new()
-        } else {
-            format!("\nRepeat: {}", rec_label)
-        };
-
-        let description_text = if !task.description.is_empty() {
-            format!("\n\nDescription:\n{}", task.description)
-        } else {
-            String::new()
-        };
-
-        let details = format!(
-            "Task: {}\n\nStatus: {}\nMatrix: {}\nCreated: {}\nDue Date: {}{}{}{}\n\nEdit inline examples:\n- Status: Pending | Completed\n- Matrix: Do | Schedule | Delegate | Eliminate\n- Reminder: 2025-12-25 09:00 | none | 'text'\n- Repeat: none | daily | weekly | monthly | range 2025-12-01 to 2025-12-31 at 08:00",
-            task.title,
-            if task.completed {
-                "Completed [check]"
-            } else {
-                "Pending"
-            },
-            task_matrix_label(task.matrix),
-            task.created_at,
-            task.due_date
-                .map(|d| d.to_string())
-                .unwrap_or("Not set".to_string()),
-            reminder_line,
-            recurrence_line,
-            description_text
-        );
-
-        let details_panel = Paragraph::new(details)
-            .block(Block::default().title("Task Details").borders(Borders::ALL))
-            .wrap(Wrap { trim: false });
-        frame.render_widget(details_panel, chunks[0]);
+        let recurrence_line = if rec_label == "None" { String::new() } else { format!("\nRepeat: {}", rec_label) };
+        let description_text = if !task.description.is_empty() { format!("\n\nDescription:\n{}", task.description) } else { String::new() };
+        let details = format!("Task: {}\n\nStatus: {}\nMatrix: {}\nCreated: {}\nDue Date: {}{}{}{}\n\nEdit inline examples:\n- Status: Pending | Completed\n- Matrix: Do | Schedule | Delegate | Eliminate\n- Reminder: 2025-12-25 09:00 | none | 'text'\n- Repeat: none | daily | weekly | monthly | range 2025-12-01 to 2025-12-31 at 08:00", task.title, if task.completed { "Completed [check]" } else { "Pending" }, task_matrix_label(task.matrix), task.created_at, task.due_date.map(|d| d.to_string()).unwrap_or("Not set".to_string()), reminder_line, recurrence_line, description_text);
+        frame.render_widget(Paragraph::new(details).block(Block::default().title("Task Details").borders(Borders::ALL)).wrap(Wrap { trim: false }), chunks[0]);
     } else {
-        let empty_panel = Paragraph::new("No tasks yet. Click 'New Task' to create one.")
-            .block(Block::default().title("Task Details").borders(Borders::ALL))
-            .wrap(Wrap { trim: false });
-        frame.render_widget(empty_panel, chunks[0]);
+        frame.render_widget(Paragraph::new("No tasks yet. Click 'New Task' to create one.").block(Block::default().title("Task Details").borders(Borders::ALL)).wrap(Wrap { trim: false }), chunks[0]);
     }
-
-    // Edit and Delete buttons
     let btn_chunks = split_equal_horizontal(chunks[1], 2);
-
     app.edit_task_btn = btn_chunks[0];
     render_button(frame, "Edit Task", btn_chunks[0], Color::Yellow);
-
     app.delete_task_btn = btn_chunks[1];
     render_button(frame, "Delete Task", btn_chunks[1], Color::Red);
 }
 
-
 fn draw_habits_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let outer = if app.show_habits_summary {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(10),
-                Constraint::Min(5),
-            ])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(5)])
-            .split(area)
-    };
-
+    let outer = if app.show_habits_summary { Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(10), Constraint::Min(5)]).split(area) } else { Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(5)]).split(area) };
     let main_area = if app.show_habits_summary {
         draw_habits_summary(frame, app, outer[0]);
         outer[1]
     } else {
         outer[0]
     };
-
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(main_area);
-
-    // Left: habit list
+    let chunks = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(40), Constraint::Percentage(60)]).split(main_area);
     app.habit_items.clear();
-
-    let editing_habit =
-        app.is_editing() && matches!(app.edit_target, EditTarget::HabitNew | EditTarget::Habit);
-
+    let editing_habit = app.is_editing() && matches!(app.edit_target, EditTarget::HabitNew | EditTarget::Habit);
     if app.habits.is_empty() && !editing_habit {
-        // Show help when no habits
-        let list = Paragraph::new(habit_help_lines())
-            .block(Block::default().title("Habits").borders(Borders::ALL))
-            .style(Style::default().fg(Color::Gray));
+        let list = Paragraph::new(habit_help_lines()).block(Block::default().title("Habits").borders(Borders::ALL)).style(Style::default().fg(Color::Gray));
         frame.render_widget(list, chunks[0]);
     } else {
         let mut items = Vec::new();
         let inner_y = chunks[0].y + 1;
         for (idx, h) in app.habits.iter().enumerate() {
-            let streak = h.streak;
-            let style = if idx == app.current_habit_idx {
-                Style::default().bg(Color::Blue).fg(Color::White)
-            } else {
-                Style::default()
-            };
-            let freq_label = recurrence_label(h.frequency);
-
-            let item_rect = Rect {
-                x: chunks[0].x,
-                y: inner_y + idx as u16,
-                width: chunks[0].width,
-                height: 1,
-            };
+            let style = if idx == app.current_habit_idx { Style::default().bg(Color::Blue).fg(Color::White) } else { Style::default() };
+            let item_rect = Rect { x: chunks[0].x, y: inner_y + idx as u16, width: chunks[0].width, height: 1 };
             app.habit_items.push((idx, item_rect));
-
-            let text = format!("{} • {} • streak {}", h.name, freq_label, streak);
-            items.push(ListItem::new(text).style(style));
+            items.push(ListItem::new(format!("{} • {} • streak {}", h.name, recurrence_label(h.frequency), h.streak)).style(style));
         }
-        let list = List::new(items).block(Block::default().title("Habits").borders(Borders::ALL));
-        frame.render_widget(list, chunks[0]);
+        frame.render_widget(List::new(items).block(Block::default().title("Habits").borders(Borders::ALL)), chunks[0]);
     }
-
-    // Right: date navigation + actions
-    let right_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(3),
-        ])
-        .split(chunks[1]);
-
+    let right_chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(3)]).split(chunks[1]);
     draw_date_navigation(frame, app, right_chunks[0]);
-
-    // Show editing panel if adding/editing habit
     if app.is_editing() && matches!(app.edit_target, EditTarget::HabitNew | EditTarget::Habit) {
-        let title = if matches!(app.edit_target, EditTarget::HabitNew) {
-            "New Habit - Fill Name/Frequency/Status (Ctrl+S to save, Esc to cancel)"
-        } else {
-            "Edit Habit - Update Name/Frequency/Status (Ctrl+S to save, Esc to cancel)"
-        };
-
-        let show_help = app.editing_input.trim().is_empty();
-        if show_help {
-            let help_layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-                .split(right_chunks[1]);
-
-            let help_panel = Paragraph::new(habit_help_lines())
-                .block(Block::default().title("How to use").borders(Borders::ALL))
-                .wrap(Wrap { trim: false })
-                .style(Style::default().fg(Color::Gray));
+        let title = if matches!(app.edit_target, EditTarget::HabitNew) { "New Habit - Fill Name/Frequency/Status (Ctrl+S to save, Esc to cancel)" } else { "Edit Habit - Update Name/Frequency/Status (Ctrl+S to save, Esc to cancel)" };
+        if app.editing_input.trim().is_empty() {
+            let help_layout = Layout::default().direction(Direction::Vertical).constraints([Constraint::Percentage(45), Constraint::Percentage(55)]).split(right_chunks[1]);
+            let help_panel = Paragraph::new(habit_help_lines()).block(Block::default().title("How to use").borders(Borders::ALL)).wrap(Wrap { trim: false }).style(Style::default().fg(Color::Gray));
             frame.render_widget(help_panel, help_layout[0]);
-
             app.content_edit_area = help_layout[1];
             render_textarea_editor(frame, app, help_layout[1], title);
         } else {
@@ -7281,302 +5120,87 @@ fn draw_habits_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     } else {
         let status = if let Some(h) = app.habits.get(app.current_habit_idx) {
             let marked = h.marks.contains(&app.current_journal_date);
-            let freq_label = recurrence_label(h.frequency);
-            let habit_state = habit_status_label(h.status);
-            let notes = if h.notes.trim().is_empty() {
-                "(none)".to_string()
-            } else {
-                h.notes.clone()
-            };
-            format!(
-                "Habit: {}\nHabit Status: {}\nTracking Since: {}\nFrequency: {}\nSelected Date: {}\nSelected Date Status: {}\nStreak: {}\n\nNotes:\n{}",
-                h.name,
-                habit_state,
-                h.start_date,
-                freq_label,
-                app.current_journal_date,
-                if marked { "Done [check]" } else { "Pending" },
-                h.streak,
-                notes
-            )
+            let notes = if h.notes.trim().is_empty() { "(none)".to_string() } else { h.notes.clone() };
+            format!("Habit: {}\nHabit Status: {}\nTracking Since: {}\nFrequency: {}\nSelected Date: {}\nSelected Date Status: {}\nStreak: {}\n\nNotes:\n{}", h.name, habit_status_label(h.status), h.start_date, recurrence_label(h.frequency), app.current_journal_date, if marked { "Done [check]" } else { "Pending" }, h.streak, notes)
         } else {
             "No habits yet. Use 'New Habit' to create one.".to_string()
         };
-
-        let details = Paragraph::new(status)
-            .block(
-                Block::default()
-                    .title("Habit Details")
-                    .borders(Borders::ALL),
-            )
-            .wrap(Wrap { trim: false });
-        frame.render_widget(details, right_chunks[1]);
+        frame.render_widget(Paragraph::new(status).block(Block::default().title("Habit Details").borders(Borders::ALL)).wrap(Wrap { trim: false }), right_chunks[1]);
     }
-
-    // Action buttons
-    let btns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-        ])
-        .split(right_chunks[2]);
-
-    let add_btn = Paragraph::new("New")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Green));
+    let btns = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(20); 5]).split(right_chunks[2]);
     app.add_habit_btn = btns[0];
-    frame.render_widget(add_btn, btns[0]);
-
-    let mark_btn = Paragraph::new("Mark")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Cyan));
+    render_button(frame, "New", btns[0], Color::Green);
     app.mark_done_btn = btns[1];
-    frame.render_widget(mark_btn, btns[1]);
-
-    let edit_btn = Paragraph::new("Edit")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Yellow));
+    render_button(frame, "Mark", btns[1], Color::Cyan);
     app.edit_habit_btn = btns[2];
-    frame.render_widget(edit_btn, btns[2]);
-
-    let del_btn = Paragraph::new("Delete")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Red));
+    render_button(frame, "Edit", btns[2], Color::Yellow);
     app.delete_habit_btn = btns[3];
-    frame.render_widget(del_btn, btns[3]);
-
-    let summary_style = if app.show_habits_summary {
-        Style::default().bg(Color::Magenta).fg(Color::White).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Magenta)
-    };
-    let summary_btn = Paragraph::new("Summary")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(summary_style);
+    render_button(frame, "Delete", btns[3], Color::Red);
+    let summary_style = if app.show_habits_summary { Style::default().bg(Color::Magenta).fg(Color::White).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Magenta) };
     app.summary_btn = btns[4];
-    frame.render_widget(summary_btn, btns[4]);
+    render_styled_button(frame, "Summary", btns[4], summary_style);
 }
 
 fn draw_finance_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let outer = if app.show_finance_summary {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Length(10),
-                Constraint::Min(5),
-                Constraint::Length(3),
-            ])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(5),
-                Constraint::Length(3),
-            ])
-            .split(area)
-    };
-
+    let outer = if app.show_finance_summary { Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(3), Constraint::Length(10), Constraint::Min(5), Constraint::Length(3)]).split(area) } else { Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(3)]).split(area) };
     draw_date_navigation(frame, app, outer[0]);
-    
     let (main_area, btn_area) = if app.show_finance_summary {
         draw_finance_summary(frame, app, outer[1]);
         (outer[2], outer[3])
     } else {
         (outer[1], outer[2])
     };
-
-    let main = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(main_area);
-
+    let main = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(50), Constraint::Percentage(50)]).split(main_area);
     draw_finance_list(frame, app, main[0]);
     draw_finance_details(frame, app, main[1]);
-
-    let btns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-            Constraint::Percentage(34),
-        ])
-        .split(btn_area);
-
-    let add_btn = Paragraph::new("New Entry")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Green));
+    let btns = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(33), Constraint::Percentage(33), Constraint::Percentage(34)]).split(btn_area);
     app.add_fin_btn = btns[0];
-    frame.render_widget(add_btn, btns[0]);
-
-    let edit_btn = Paragraph::new("Edit Entry")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Yellow));
+    render_button(frame, "New Entry", btns[0], Color::Green);
     app.edit_fin_btn = btns[1];
-    frame.render_widget(edit_btn, btns[1]);
-
-    let del_btn = Paragraph::new("Delete Entry")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Red));
+    render_button(frame, "Edit Entry", btns[1], Color::Yellow);
     app.delete_fin_btn = btns[2];
-    frame.render_widget(del_btn, btns[2]);
+    render_button(frame, "Delete Entry", btns[2], Color::Red);
+}
+
+fn format_currency_compact(amount: f64, decimals_lt_1k: usize) -> String {
+    if amount >= 1_000_000.0 {
+        format!("${:.2}M", amount / 1_000_000.0)
+    } else if amount >= 1_000.0 {
+        format!("${:.1}K", amount / 1_000.0)
+    } else {
+        format!("${:.*}", decimals_lt_1k, amount)
+    }
 }
 
 fn draw_finance_summary(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     let current_date = app.current_journal_date;
     let current_year = current_date.year();
     let current_month = current_date.month();
-
-    // Collect unique categories and always include "All" for full totals
-    let categories: Vec<String> = std::iter::once("All".to_string())
-        .chain(
-            app.finances
-                .iter()
-                .map(|e| e.category.clone())
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter(),
-        )
-        .collect();
-
-    // Get selected category (safe wrap around)
+    let categories: Vec<String> = std::iter::once("All".to_string()).chain(app.finances.iter().map(|e| e.category.clone()).collect::<std::collections::BTreeSet<_>>()).collect();
     let selected_idx = app.selected_finance_category_idx.min(categories.len().saturating_sub(1));
     let selected_category = categories.get(selected_idx).cloned().unwrap_or_default();
-
-    // Filter entries by selected category
-    let filtered_entries: Vec<&FinanceEntry> = if selected_category == "All" {
-        app.finances.iter().collect()
-    } else {
-        app.finances
-            .iter()
-            .filter(|e| e.category == selected_category)
-            .collect()
-    };
-
-    // Calculate monthly total for selected category
-    let monthly_total: f64 = filtered_entries
-        .iter()
-        .filter(|e| e.date.year() == current_year && e.date.month() == current_month)
-        .map(|e| e.amount)
-        .sum();
-
-    // Calculate yearly total for selected category
-    let yearly_total: f64 = filtered_entries
-        .iter()
-        .filter(|e| e.date.year() == current_year)
-        .map(|e| e.amount)
-        .sum();
-
-    // Calculate monthly totals for the current year (for bar graph)
+    let filtered: Vec<&FinanceEntry> = if selected_category == "All" { app.finances.iter().collect() } else { app.finances.iter().filter(|e| e.category == selected_category).collect() };
+    let monthly_total: f64 = filtered.iter().filter(|e| e.date.year() == current_year && e.date.month() == current_month).map(|e| e.amount).sum();
+    let yearly_total: f64 = filtered.iter().filter(|e| e.date.year() == current_year).map(|e| e.amount).sum();
     let mut month_totals = vec![0.0; 12];
-    for entry in &filtered_entries {
+    for entry in &filtered {
         if entry.date.year() == current_year {
-            let month_idx = (entry.date.month() - 1) as usize;
-            month_totals[month_idx] += entry.amount;
+            month_totals[(entry.date.month() - 1) as usize] += entry.amount;
         }
     }
-
-    // Find max for scaling
     let max_month = month_totals.iter().cloned().fold(0.0, f64::max);
     let scale_factor = if max_month > 0.0 { 30.0 / max_month } else { 1.0 };
-
-    // Build bar graph
-    let mut graph_lines = Vec::new();
-    
-    // Helper function to format currency
-    let format_currency = |amount: f64| -> String {
-        if amount >= 1_000_000.0 {
-            format!("${:.2}M", amount / 1_000_000.0)
-        } else if amount >= 1_000.0 {
-            format!("${:.1}K", amount / 1_000.0)
-        } else {
-            format!("${:.2}", amount)
-        }
-    };
-    
-    // Category selector and totals header
-    let category_nav = if categories.len() > 1 {
-        format!(
-            "Category: {} (← {} →) | Monthly: {} | Yearly: {}",
-            selected_category, 
-            format!("{}/{}", selected_idx + 1, categories.len()),
-            format_currency(monthly_total),
-            format_currency(yearly_total)
-        )
-    } else {
-        format!(
-            "Category: {} | Monthly: {} | Yearly: {}",
-            selected_category,
-            format_currency(monthly_total),
-            format_currency(yearly_total)
-        )
-    };
-    
-    graph_lines.push(Line::from(Span::styled(
-        category_nav,
-        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-    )));
-    graph_lines.push(Line::from(""));
-    graph_lines.push(Line::from(Span::styled(
-        format!("{}:{} Bar = Monthly Spending", current_month, current_year),
-        Style::default().fg(Color::Cyan),
-    )));
-    graph_lines.push(Line::from(""));
-
-    // Monthly bar graph
+    let nav = if categories.len() > 1 { format!("Category: {} (← {}/{} →) | Monthly: {} | Yearly: {}", selected_category, selected_idx + 1, categories.len(), format_currency_compact(monthly_total, 2), format_currency_compact(yearly_total, 2)) } else { format!("Category: {} | Monthly: {} | Yearly: {}", selected_category, format_currency_compact(monthly_total, 2), format_currency_compact(yearly_total, 2)) };
+    let mut graph_lines = vec![Line::from(Span::styled(nav, Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))), Line::from(""), Line::from(Span::styled(format!("{}:{} Bar = Monthly Spending", current_month, current_year), Style::default().fg(Color::Cyan))), Line::from("")];
     let month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     for (i, &total) in month_totals.iter().enumerate() {
-        let bar_length = (total * scale_factor) as usize;
-        let bar = "█".repeat(bar_length.min(30));
+        let bar = "█".repeat(((total * scale_factor) as usize).min(30));
         let is_current = (i + 1) as u32 == current_month;
-        
         let color = if is_current { Color::Cyan } else { Color::Blue };
-        let month_style = if is_current {
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-
-        // Format number with proper separators for readability
-        let formatted_total = if total >= 1_000_000.0 {
-            format!("${:.2}M", total / 1_000_000.0)
-        } else if total >= 1_000.0 {
-            format!("${:.1}K", total / 1_000.0)
-        } else {
-            format!("${:.0}", total)
-        };
-
-        graph_lines.push(Line::from(vec![
-            Span::styled(format!("{:>3} ", month_names[i]), month_style),
-            Span::styled(bar, Style::default().fg(color)),
-            Span::raw(format!(" {}", formatted_total)),
-        ]));
+        let month_style = if is_current { Style::default().fg(Color::White).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) };
+        graph_lines.push(Line::from(vec![Span::styled(format!("{:>3} ", month_names[i]), month_style), Span::styled(bar, Style::default().fg(color)), Span::raw(format!(" {}", format_currency_compact(total, 0)))]));
     }
-
-    let summary_widget = Paragraph::new(graph_lines)
-        .block(
-            Block::default()
-                .title(format!("Expenditure Summary {} (← → to change category, ↑ ↓ to scroll)", current_year))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Magenta)),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((app.finance_summary_scroll, 0));
-
-    frame.render_widget(summary_widget, area);
+    frame.render_widget(Paragraph::new(graph_lines).block(Block::default().title(format!("Expenditure Summary {} (← → to change category, ↑ ↓ to scroll)", current_year)).borders(Borders::ALL).border_style(Style::default().fg(Color::Magenta))).wrap(Wrap { trim: false }).scroll((app.finance_summary_scroll, 0)), area);
 }
 
 fn draw_habits_summary(frame: &mut ratatui::Frame, app: &App, area: Rect) {
@@ -7584,87 +5208,33 @@ fn draw_habits_summary(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     let current_year = current_date.year();
     let current_month = current_date.month();
 
-    let mut graph_lines = Vec::new();
-    
-    // Calculate overall stats
     let total_habits = app.habits.len();
     let active_habits = app.habits.iter().filter(|h| h.status == HabitStatus::Active).count();
     let paused_habits = app.habits.iter().filter(|h| h.status == HabitStatus::Paused).count();
-    
-    // Calculate completion counts per month
     let mut month_completed = vec![0usize; 12];
     let mut month_possible = vec![0usize; 12];
-    
     for habit in app.habits.iter().filter(|h| h.status == HabitStatus::Active) {
         for month in 1..=12 {
-            // Count days in this month
-            let days_in_month = if let Some(first_day) = NaiveDate::from_ymd_opt(current_year, month, 1) {
-                let next_month = if month == 12 {
-                    NaiveDate::from_ymd_opt(current_year + 1, 1, 1)
-                } else {
-                    NaiveDate::from_ymd_opt(current_year, month + 1, 1)
-                };
-                next_month.map(|d| (d - first_day).num_days()).unwrap_or(30)
-            } else {
-                30
-            };
-            
+            let days_in_month = NaiveDate::from_ymd_opt(current_year, month, 1)
+                .and_then(|first_day| {
+                    let nm = if month == 12 { NaiveDate::from_ymd_opt(current_year + 1, 1, 1) } else { NaiveDate::from_ymd_opt(current_year, month + 1, 1) };
+                    nm.map(|d| (d - first_day).num_days())
+                })
+                .unwrap_or(30);
             month_possible[(month - 1) as usize] += days_in_month as usize;
-            
-            // Count completed days for this habit in this month
-            let completed = habit.marks.iter()
-                .filter(|d| d.year() == current_year && d.month() == month)
-                .count();
-            month_completed[(month - 1) as usize] += completed;
+            month_completed[(month - 1) as usize] += habit.marks.iter().filter(|d| d.year() == current_year && d.month() == month).count();
         }
     }
-    
-    // Calculate completion percentages
-    let month_percentages: Vec<f64> = month_completed.iter()
-        .zip(month_possible.iter())
-        .map(|(completed, possible)| {
-            if *possible > 0 {
-                (*completed as f64 / *possible as f64) * 100.0
-            } else {
-                0.0
-            }
-        })
-        .collect();
-    
-    // Current month stats (for display if needed)
-    let _monthly_completed = month_completed[(current_month - 1) as usize];
-    let _monthly_possible = month_possible[(current_month - 1) as usize];
+    let month_percentages: Vec<f64> = month_completed.iter().zip(month_possible.iter()).map(|(c, p)| if *p > 0 { (*c as f64 / *p as f64) * 100.0 } else { 0.0 }).collect();
     let monthly_rate = month_percentages[(current_month - 1) as usize];
-    
-    // Yearly totals
     let yearly_completed: usize = month_completed.iter().sum();
     let yearly_possible: usize = month_possible.iter().sum();
-    let yearly_rate = if yearly_possible > 0 {
-        (yearly_completed as f64 / yearly_possible as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    // Header with stats
-    graph_lines.push(Line::from(Span::styled(
-        format!("Total: {} | Active: {} | Paused: {} | Monthly: {:.1}% | Yearly: {:.1}%", 
-            total_habits, active_habits, paused_habits, monthly_rate, yearly_rate),
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    )));
-    graph_lines.push(Line::from(""));
-    graph_lines.push(Line::from(Span::styled(
-        format!("{}:{} Bar = Completion Rate", current_month, current_year),
-        Style::default().fg(Color::Cyan),
-    )));
-    graph_lines.push(Line::from(""));
-
-    // Monthly completion bar graph
+    let yearly_rate = if yearly_possible > 0 { (yearly_completed as f64 / yearly_possible as f64) * 100.0 } else { 0.0 };
+    let mut graph_lines = vec![Line::from(Span::styled(format!("Total: {} | Active: {} | Paused: {} | Monthly: {:.1}% | Yearly: {:.1}%", total_habits, active_habits, paused_habits, monthly_rate, yearly_rate), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))), Line::from(""), Line::from(Span::styled(format!("{}:{} Bar = Completion Rate", current_month, current_year), Style::default().fg(Color::Cyan))), Line::from("")];
     let month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     for (i, &percentage) in month_percentages.iter().enumerate() {
-        let bar_length = (percentage * 0.3) as usize; // Scale to 30 chars max
-        let bar = "█".repeat(bar_length.min(30));
+        let bar = "█".repeat(((percentage * 0.3) as usize).min(30));
         let is_current = (i + 1) as u32 == current_month;
-        
         let color = if percentage >= 80.0 {
             Color::Green
         } else if percentage >= 50.0 {
@@ -7672,313 +5242,114 @@ fn draw_habits_summary(frame: &mut ratatui::Frame, app: &App, area: Rect) {
         } else {
             Color::Red
         };
-        
-        let month_style = if is_current {
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-
-        graph_lines.push(Line::from(vec![
-            Span::styled(format!("{:>3} ", month_names[i]), month_style),
-            Span::styled(bar, Style::default().fg(color)),
-            Span::raw(format!(" {:.1}%", percentage)),
-        ]));
+        let month_style = if is_current { Style::default().fg(Color::White).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) };
+        graph_lines.push(Line::from(vec![Span::styled(format!("{:>3} ", month_names[i]), month_style), Span::styled(bar, Style::default().fg(color)), Span::raw(format!(" {:.1}%", percentage))]));
     }
-
-    let summary_widget = Paragraph::new(graph_lines)
-        .block(
-            Block::default()
-                .title(format!("Habits Completion Summary {} (↑ ↓ to scroll)", current_year))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan)),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((app.habits_summary_scroll, 0));
-
-    frame.render_widget(summary_widget, area);
+    frame.render_widget(Paragraph::new(graph_lines).block(Block::default().title(format!("Habits Completion Summary {} (↑ ↓ to scroll)", current_year)).borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan))).wrap(Wrap { trim: false }).scroll((app.habits_summary_scroll, 0)), area);
 }
 
 fn draw_finance_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     app.finance_items.clear();
-
-    let entries: Vec<(usize, &FinanceEntry)> = app
-        .finances
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| e.date == app.current_journal_date)
-        .collect();
-
-    let editing_finance =
-        app.is_editing() && matches!(app.edit_target, EditTarget::FinanceNew | EditTarget::Finance);
-
-    if entries.is_empty() && !editing_finance {
-        // Show help when no entries
-        let list = Paragraph::new(finance_help_lines())
-            .block(
-                Block::default()
-                    .title("Finance Finance (by selected date)")
-                    .borders(Borders::ALL),
-            )
-            .style(Style::default().fg(Color::Gray));
-        frame.render_widget(list, area);
+    let entries: Vec<(usize, &FinanceEntry)> = app.finances.iter().enumerate().filter(|(_, e)| e.date == app.current_journal_date).collect();
+    let editing = app.is_editing() && matches!(app.edit_target, EditTarget::FinanceNew | EditTarget::Finance);
+    let title = "Finance Finance (by selected date)";
+    if entries.is_empty() && !editing {
+        frame.render_widget(Paragraph::new(finance_help_lines()).block(Block::default().title(title).borders(Borders::ALL)).style(Style::default().fg(Color::Gray)), area);
     } else {
         let list_data = entries
             .iter()
             .map(|(idx, entry)| {
-                let preview_note = entry
-                    .note
-                    .lines()
-                    .next()
-                    .map(|l| format!(" - {}", l))
-                    .unwrap_or_default();
-                let text = format!("{} | {:.2}{}", entry.category, entry.amount, preview_note);
-                (*idx, text, false)
+                let preview = entry.note.lines().next().map(|l| format!(" - {}", l)).unwrap_or_default();
+                (*idx, format!("{} | {:.2}{}", entry.category, entry.amount, preview), false)
             })
             .collect();
-
-        let items = build_list_items(
-            list_data,
-            app.current_finance_idx,
-            area,
-            &mut app.finance_items,
-        );
-
-        let list = List::new(items).block(
-            Block::default()
-                .title("Finance Finance (by selected date)")
-                .borders(Borders::ALL),
-        );
-        frame.render_widget(list, area);
+        let items = build_list_items(list_data, app.current_finance_idx, area, &mut app.finance_items);
+        frame.render_widget(List::new(items).block(Block::default().title(title).borders(Borders::ALL)), area);
     }
 }
 
 fn draw_finance_details(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    if app.is_editing()
-        && matches!(
-            app.edit_target,
-            EditTarget::FinanceNew | EditTarget::Finance
-        )
-    {
-        let title = if matches!(app.edit_target, EditTarget::FinanceNew) {
-            "New Finance Entry - Fill Category/Amount/Notes (Ctrl + s to save)"
-        } else {
-            "Edit Finance Entry - Update Category/Amount/Notes (Ctrl + s to save)"
-        };
-
+    if app.is_editing() && matches!(app.edit_target, EditTarget::FinanceNew | EditTarget::Finance) {
+        let title = if matches!(app.edit_target, EditTarget::FinanceNew) { "New Finance Entry - Fill Category/Amount/Notes (Ctrl + s to save)" } else { "Edit Finance Entry - Update Category/Amount/Notes (Ctrl + s to save)" };
         app.content_edit_area = area;
         render_textarea_editor(frame, app, area, title);
         return;
     }
-
-    if let Some(entry) = app.finances.get(app.current_finance_idx) {
-        let body = format!(
-            "Date: {}\nCategory: {}\nAmount: {:.2}\n\nNote:\n{}",
-            entry.date,
-            entry.category,
-            entry.amount,
-            if entry.note.is_empty() {
-                "(none)".to_string()
-            } else {
-                entry.note.clone()
-            }
-        );
-
-        let panel = Paragraph::new(body)
-            .block(
-                Block::default()
-                    .title("Entry Details")
-                    .borders(Borders::ALL),
-            )
-            .wrap(Wrap { trim: false });
-        frame.render_widget(panel, area);
+    let block = Block::default().title("Entry Details").borders(Borders::ALL);
+    let body = if let Some(entry) = app.finances.get(app.current_finance_idx) {
+        let note = if entry.note.is_empty() { "(none)".to_string() } else { entry.note.clone() };
+        format!("Date: {}\nCategory: {}\nAmount: {:.2}\n\nNote:\n{}", entry.date, entry.category, entry.amount, note)
     } else {
-        let empty = Paragraph::new("No entries for this date. Use 'New Entry' to create one.")
-            .block(
-                Block::default()
-                    .title("Entry Details")
-                    .borders(Borders::ALL),
-            )
-            .wrap(Wrap { trim: false });
-        frame.render_widget(empty, area);
-    }
+        "No entries for this date. Use 'New Entry' to create one.".to_string()
+    };
+    frame.render_widget(Paragraph::new(body).block(block).wrap(Wrap { trim: false }), area);
 }
 
 fn draw_calories_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(3),
-        ])
-        .split(area);
-
+    let outer = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(3)]).split(area);
     draw_date_navigation(frame, app, outer[0]);
-
-    let main = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(outer[1]);
-
+    let main = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(50), Constraint::Percentage(50)]).split(outer[1]);
     draw_calorie_list(frame, app, main[0]);
     draw_calorie_details(frame, app, main[1]);
-
-    let btns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-            Constraint::Percentage(34),
-        ])
-        .split(outer[2]);
-
-    let add_btn = Paragraph::new("New Meal")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Green));
+    let btns = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(33), Constraint::Percentage(33), Constraint::Percentage(34)]).split(outer[2]);
     app.add_cal_btn = btns[0];
-    frame.render_widget(add_btn, btns[0]);
-
-    let edit_btn = Paragraph::new("Edit Meal")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Yellow));
+    render_button(frame, "New Meal", btns[0], Color::Green);
     app.edit_cal_btn = btns[1];
-    frame.render_widget(edit_btn, btns[1]);
-
-    let del_btn = Paragraph::new("Delete Meal")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Red));
+    render_button(frame, "Edit Meal", btns[1], Color::Yellow);
     app.delete_cal_btn = btns[2];
-    frame.render_widget(del_btn, btns[2]);
+    render_button(frame, "Delete Meal", btns[2], Color::Red);
 }
 
 fn draw_calorie_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     app.calorie_items.clear();
-
-    let entries: Vec<(usize, &CalorieEntry)> = app
-        .calories
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| e.date == app.current_journal_date)
-        .collect();
-
-    let editing_calories =
-        app.is_editing() && matches!(app.edit_target, EditTarget::CaloriesNew | EditTarget::Calories);
-
-    if entries.is_empty() && !editing_calories {
-        // Show help when no entries
-        let list = Paragraph::new(calorie_help_lines())
-            .block(
-                Block::default()
-                    .title("Calories Calories (by selected date)")
-                    .borders(Borders::ALL),
-            )
-            .style(Style::default().fg(Color::Gray));
-        frame.render_widget(list, area);
+    let entries: Vec<(usize, &CalorieEntry)> = app.calories.iter().enumerate().filter(|(_, e)| e.date == app.current_journal_date).collect();
+    let editing = app.is_editing() && matches!(app.edit_target, EditTarget::CaloriesNew | EditTarget::Calories);
+    let title = "Calories Calories (by selected date)";
+    if entries.is_empty() && !editing {
+        frame.render_widget(Paragraph::new(calorie_help_lines()).block(Block::default().title(title).borders(Borders::ALL)).style(Style::default().fg(Color::Gray)), area);
     } else {
         let list_data = entries
             .iter()
             .map(|(idx, entry)| {
-                let preview_note = entry
-                    .note
-                    .lines()
-                    .next()
-                    .map(|l| format!(" - {}", l))
-                    .unwrap_or_default();
-                let text = format!("{} | {} kcal{}", entry.meal, entry.calories, preview_note);
-                (*idx, text, false)
+                let preview = entry.note.lines().next().map(|l| format!(" - {}", l)).unwrap_or_default();
+                (*idx, format!("{} | {} kcal{}", entry.meal, entry.calories, preview), false)
             })
             .collect();
-
-        let items = build_list_items(
-            list_data,
-            app.current_calorie_idx,
-            area,
-            &mut app.calorie_items,
-        );
-
-        let list = List::new(items).block(
-            Block::default()
-                .title("Calories Calories (by selected date)")
-                .borders(Borders::ALL),
-        );
-        frame.render_widget(list, area);
+        let items = build_list_items(list_data, app.current_calorie_idx, area, &mut app.calorie_items);
+        frame.render_widget(List::new(items).block(Block::default().title(title).borders(Borders::ALL)), area);
     }
 }
 
 fn draw_calorie_details(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    if app.is_editing()
-        && matches!(
-            app.edit_target,
-            EditTarget::CaloriesNew | EditTarget::Calories
-        )
-    {
-        let title = if matches!(app.edit_target, EditTarget::CaloriesNew) {
-            "New Meal - Fill Meal/Calories/Notes (Ctrl+S to save, Esc to cancel)"
-        } else {
-            "Edit Meal - Update Meal/Calories/Notes (Ctrl+S to save, Esc to cancel)"
-        };
-
+    if app.is_editing() && matches!(app.edit_target, EditTarget::CaloriesNew | EditTarget::Calories) {
+        let title = if matches!(app.edit_target, EditTarget::CaloriesNew) { "New Meal - Fill Meal/Calories/Notes (Ctrl+S to save, Esc to cancel)" } else { "Edit Meal - Update Meal/Calories/Notes (Ctrl+S to save, Esc to cancel)" };
         app.content_edit_area = area;
         render_textarea_editor(frame, app, area, title);
         return;
     }
-
-    if let Some(entry) = app.calories.get(app.current_calorie_idx) {
-        let body = format!(
-            "Date: {}\nMeal: {}\nCalories: {}\n\nNote:\n{}",
-            entry.date,
-            entry.meal,
-            entry.calories,
-            if entry.note.is_empty() {
-                "(none)".to_string()
-            } else {
-                entry.note.clone()
-            }
-        );
-
-        let panel = Paragraph::new(body)
-            .block(Block::default().title("Meal Details").borders(Borders::ALL))
-            .wrap(Wrap { trim: false });
-        frame.render_widget(panel, area);
+    let block = Block::default().title("Meal Details").borders(Borders::ALL);
+    let body = if let Some(entry) = app.calories.get(app.current_calorie_idx) {
+        let note = if entry.note.is_empty() { "(none)".to_string() } else { entry.note.clone() };
+        format!("Date: {}\nMeal: {}\nCalories: {}\n\nNote:\n{}", entry.date, entry.meal, entry.calories, note)
     } else {
-        let empty = Paragraph::new("No meals for this date. Use 'New Meal' to create one.")
-            .block(Block::default().title("Meal Details").borders(Borders::ALL))
-            .wrap(Wrap { trim: false });
-        frame.render_widget(empty, area);
-    }
+        "No meals for this date. Use 'New Meal' to create one.".to_string()
+    };
+    frame.render_widget(Paragraph::new(body).block(block).wrap(Wrap { trim: false }), area);
 }
 
 fn draw_kanban_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let editing = app.is_editing()
-        && matches!(app.edit_target, EditTarget::KanbanNew | EditTarget::KanbanEdit);
+    let editing = app.is_editing() && matches!(app.edit_target, EditTarget::KanbanNew | EditTarget::KanbanEdit);
 
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(5)])
-        .split(area);
+    let outer = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(3), Constraint::Min(5)]).split(area);
 
     draw_kanban_header(frame, app, outer[0]);
 
-    let layout: Rc<[Rect]> = if editing {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-            .split(outer[1])
-    } else {
-        Rc::from([outer[1]])
-    };
+    let layout: Rc<[Rect]> = if editing { Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(65), Constraint::Percentage(35)]).split(outer[1]) } else { Rc::from([outer[1]]) };
 
     let main_area = layout[0];
     match app.kanban_view {
         KanbanView::Board => {
-            let main_split = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(5), Constraint::Length(3)])
-                .split(main_area);
+            let main_split = Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(5), Constraint::Length(3)]).split(main_area);
 
             draw_kanban_board(frame, app, main_split[0]);
             draw_kanban_controls(frame, app, main_split[1]);
@@ -7990,11 +5361,7 @@ fn draw_kanban_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
     if editing {
         let side = layout[1];
-        let title = if matches!(app.edit_target, EditTarget::KanbanNew) {
-            "New Card - Fill Title/Matrix/Due/Note (Ctrl+S to save, Esc to cancel)"
-        } else {
-            "Edit Card - Update Title/Matrix/Due/Note (Ctrl+S to save, Esc to cancel)"
-        };
+        let title = if matches!(app.edit_target, EditTarget::KanbanNew) { "New Card - Fill Title/Matrix/Due/Note (Ctrl+S to save, Esc to cancel)" } else { "Edit Card - Update Title/Matrix/Due/Note (Ctrl+S to save, Esc to cancel)" };
 
         app.content_edit_area = side;
         render_textarea_editor(frame, app, side, title);
@@ -8002,59 +5369,25 @@ fn draw_kanban_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_kanban_header(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
-    let board_style = if matches!(app.kanban_view, KanbanView::Board) {
-        Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Cyan)
-    };
-
-    let matrix_style = if matches!(app.kanban_view, KanbanView::Matrix) {
-        Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Yellow)
-    };
-
-    let board_btn = Paragraph::new("Board")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(board_style);
+    let chunks = split_equal_horizontal(area, 2);
+    let active = Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD);
+    let board_style = if matches!(app.kanban_view, KanbanView::Board) { active } else { Style::default().fg(Color::Cyan) };
+    let matrix_style = if matches!(app.kanban_view, KanbanView::Matrix) { active } else { Style::default().fg(Color::Yellow) };
+    render_styled_button(frame, "Board", chunks[0], board_style);
     app.kanban_board_btn = chunks[0];
-    frame.render_widget(board_btn, chunks[0]);
-
-    let matrix_btn = Paragraph::new("Eisenhower Matrix")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(matrix_style);
+    render_styled_button(frame, "Eisenhower Matrix", chunks[1], matrix_style);
     app.kanban_matrix_btn = chunks[1];
-    frame.render_widget(matrix_btn, chunks[1]);
 }
 
 fn draw_kanban_matrix_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(5), Constraint::Length(3)])
-        .split(area);
-
+    let chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(7), Constraint::Min(5), Constraint::Length(3)]).split(area);
     draw_kanban_schedule_focus(frame, app, chunks[0]);
     draw_kanban_matrix_grid(frame, app, chunks[1]);
     draw_kanban_matrix_assign_buttons(frame, app, chunks[2]);
 }
 
 fn draw_kanban_schedule_focus(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let mut items = Vec::new();
     app.kanban_matrix_items.clear();
-
     let today = Local::now().date_naive();
     let focus_items = app
         .kanban_cards
@@ -8062,244 +5395,95 @@ fn draw_kanban_schedule_focus(frame: &mut ratatui::Frame, app: &mut App, area: R
         .enumerate()
         .filter(|(_, c)| matches!(c.matrix, TaskMatrix::Schedule))
         .map(|(idx, card)| {
-            let due = card
-                .due_date
-                .map(|d| d.to_string())
-                .unwrap_or_else(|| "No date".to_string());
+            let due = card.due_date.map(|d| d.to_string()).unwrap_or_else(|| "No date".to_string());
             let today_flag = if card.due_date == Some(today) { " • Today" } else { "" };
-            let text = format!("{}{}", card.title, format!(" ({}){}", due, today_flag));
-            (idx, text, false)
+            (idx, format!("{} ({}){}", card.title, due, today_flag), false)
         })
         .collect::<Vec<_>>();
-
-    items.extend(build_list_items(
-        focus_items,
-        app.current_kanban_card_idx,
-        area,
-        &mut app.kanban_matrix_items,
-    ));
-
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .title("Schedule Focus (Today + Planned)")
-                .borders(Borders::ALL),
-        )
-        .style(Style::default().fg(Color::White));
-    frame.render_widget(list, area);
+    let items = build_list_items(focus_items, app.current_kanban_card_idx, area, &mut app.kanban_matrix_items);
+    frame.render_widget(List::new(items).block(Block::default().title("Schedule Focus (Today + Planned)").borders(Borders::ALL)).style(Style::default().fg(Color::White)), area);
 }
 
 fn draw_kanban_matrix_grid(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
-    let top = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(rows[0]);
-
-    let bottom = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(rows[1]);
-
-    draw_kanban_matrix_quadrant(frame, app, top[0], TaskMatrix::Do, "Do (Urgent + Important)");
-    draw_kanban_matrix_quadrant(frame, app, top[1], TaskMatrix::Schedule, "Schedule (Important + Not Urgent)");
-    draw_kanban_matrix_quadrant(frame, app, bottom[0], TaskMatrix::Delegate, "Delegate (Urgent + Not Important)");
-    draw_kanban_matrix_quadrant(frame, app, bottom[1], TaskMatrix::Eliminate, "Eliminate (Not Urgent + Not Important)");
+    let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Percentage(50); 2]).split(area);
+    let top = split_equal_horizontal(rows[0], 2);
+    let bottom = split_equal_horizontal(rows[1], 2);
+    for (area, m, t) in [(top[0], TaskMatrix::Do, "Do (Urgent + Important)"), (top[1], TaskMatrix::Schedule, "Schedule (Important + Not Urgent)"), (bottom[0], TaskMatrix::Delegate, "Delegate (Urgent + Not Important)"), (bottom[1], TaskMatrix::Eliminate, "Eliminate (Not Urgent + Not Important)")] {
+        draw_kanban_matrix_quadrant(frame, app, area, m, t);
+    }
 }
 
-fn draw_kanban_matrix_quadrant(
-    frame: &mut ratatui::Frame,
-    app: &mut App,
-    area: Rect,
-    matrix: TaskMatrix,
-    title: &str,
-) {
+fn draw_kanban_matrix_quadrant(frame: &mut ratatui::Frame, app: &mut App, area: Rect, matrix: TaskMatrix, title: &str) {
     let items_iter = app
         .kanban_cards
         .iter()
         .enumerate()
         .filter(|(_, card)| card.matrix == matrix)
         .map(|(idx, card)| {
-            let title_first_line = card.title.lines().next().unwrap_or(&card.title);
-            let due_str = card
-                .due_date
-                .map(|d| format!(" ({})", d))
-                .unwrap_or_default();
-            let text = format!("{}{}", title_first_line, due_str);
-            (idx, text, false)
+            let first = card.title.lines().next().unwrap_or(&card.title);
+            let due_str = card.due_date.map(|d| format!(" ({})", d)).unwrap_or_default();
+            (idx, format!("{}{}", first, due_str), false)
         })
         .collect::<Vec<_>>();
-
-    let items = build_list_items(
-        items_iter,
-        app.current_kanban_card_idx,
-        area,
-        &mut app.kanban_matrix_items,
-    );
-    let list = List::new(items)
-        .block(Block::default().title(title).borders(Borders::ALL))
-        .style(Style::default().fg(Color::White));
-    frame.render_widget(list, area);
+    let items = build_list_items(items_iter, app.current_kanban_card_idx, area, &mut app.kanban_matrix_items);
+    frame.render_widget(List::new(items).block(Block::default().title(title).borders(Borders::ALL)).style(Style::default().fg(Color::White)), area);
 }
 
 fn draw_kanban_matrix_assign_buttons(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let chunks = split_equal_horizontal(area, 4);
-
     app.kanban_matrix_do_btn = chunks[0];
     render_button(frame, "Assign Do", chunks[0], Color::Red);
-
     app.kanban_matrix_schedule_btn = chunks[1];
     render_button(frame, "Assign Schedule", chunks[1], Color::Yellow);
-
     app.kanban_matrix_delegate_btn = chunks[2];
     render_button(frame, "Assign Delegate", chunks[2], Color::Cyan);
-
     app.kanban_matrix_eliminate_btn = chunks[3];
     render_button(frame, "Assign Eliminate", chunks[3], Color::Gray);
 }
 
 fn draw_kanban_board(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(33),
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-        ])
-        .split(area);
-
+    let cols = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(33), Constraint::Percentage(34), Constraint::Percentage(33)]).split(area);
     app.kanban_items.clear();
-
-    for (stage, col_area) in [KanbanStage::Todo, KanbanStage::Doing, KanbanStage::Done]
-        .iter()
-        .zip(cols.iter())
-    {
+    for (stage, col_area) in [KanbanStage::Todo, KanbanStage::Doing, KanbanStage::Done].iter().zip(cols.iter()) {
         let mut items = Vec::new();
         let mut row = 0u16;
         for (idx, card) in app.kanban_cards.iter().enumerate() {
             if &card.stage != stage {
                 continue;
             }
-
-            let is_selected = idx == app.current_kanban_card_idx;
-            let mut preview = card
-                .note
-                .lines()
-                .next()
-                .map(|l| format!(" · {}", l))
-                .unwrap_or_default();
+            let mut preview = card.note.lines().next().map(|l| format!(" · {}", l)).unwrap_or_default();
             if preview.len() > 32 {
                 preview.truncate(32);
                 preview.push('…');
             }
-            let text = format!("{}{}", card.title, preview);
-            let style = if is_selected {
-                Style::default()
-                    .bg(Color::Blue)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(stage.color())
-            };
-            items.push(ListItem::new(text).style(style));
-
-            let item_rect = Rect {
-                x: col_area.x + 1,
-                y: col_area.y + 1 + row,
-                width: col_area.width.saturating_sub(2),
-                height: 1,
-            };
-            app.kanban_items.push((idx, item_rect));
+            let style = if idx == app.current_kanban_card_idx { Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD) } else { Style::default().fg(stage.color()) };
+            items.push(ListItem::new(format!("{}{}", card.title, preview)).style(style));
+            app.kanban_items.push((idx, Rect { x: col_area.x + 1, y: col_area.y + 1 + row, width: col_area.width.saturating_sub(2), height: 1 }));
             row += 1;
         }
-
         let title = format!("{} ({})", stage.label(), items.len());
-        let list = List::new(items).block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(stage.color())),
-        );
-        frame.render_widget(list, *col_area);
+        frame.render_widget(List::new(items).block(Block::default().title(title).borders(Borders::ALL).border_style(Style::default().fg(stage.color()))), *col_area);
     }
 }
 
 fn draw_kanban_controls(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let controls = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-        ])
-        .split(area);
-
-    let new_btn = Paragraph::new("New Card")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Green));
+    let controls = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(25); 4]).split(area);
     app.add_kanban_btn = controls[0];
-    frame.render_widget(new_btn, controls[0]);
-
-    let left_btn = Paragraph::new("Move Left")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Yellow));
+    render_button(frame, "New Card", controls[0], Color::Green);
     app.move_left_kanban_btn = controls[1];
-    frame.render_widget(left_btn, controls[1]);
-
-    let right_btn = Paragraph::new("Move Right")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Cyan));
+    render_button(frame, "Move Left", controls[1], Color::Yellow);
     app.move_right_kanban_btn = controls[2];
-    frame.render_widget(right_btn, controls[2]);
-
-    let del_btn = Paragraph::new("Delete Card")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Red));
+    render_button(frame, "Move Right", controls[2], Color::Cyan);
     app.delete_kanban_btn = controls[3];
-    frame.render_widget(del_btn, controls[3]);
+    render_button(frame, "Delete Card", controls[3], Color::Red);
 }
 
-// ===== FLASHCARDS (SPACED REPETITION) VIEW =====
-
 fn draw_flashcards_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let editing = app.is_editing()
-        && matches!(app.edit_target, EditTarget::CardNew | EditTarget::CardEdit | EditTarget::CardImport);
-
-    let layout: Rc<[Rect]> = if editing {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(area)
-    } else {
-        Rc::from([area])
-    };
-
-    let main_area = layout[0];
-    let vertical_constraints: Vec<Constraint> = if app.card_review_mode {
-        vec![Constraint::Length(3), Constraint::Min(10)]
-    } else {
-        vec![
-            Constraint::Length(3),
-            Constraint::Min(10),
-            Constraint::Length(3),
-        ]
-    };
-    let main_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(vertical_constraints)
-        .split(main_area);
-
+    let editing = app.is_editing() && matches!(app.edit_target, EditTarget::CardNew | EditTarget::CardEdit | EditTarget::CardImport);
+    let layout: Rc<[Rect]> = if editing { Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area) } else { Rc::from([area]) };
+    let vc: Vec<Constraint> = if app.card_review_mode { vec![Constraint::Length(3), Constraint::Min(10)] } else { vec![Constraint::Length(3), Constraint::Min(10), Constraint::Length(3)] };
+    let main_chunks = Layout::default().direction(Direction::Vertical).constraints(vc).split(layout[0]);
     draw_card_controls(frame, app, main_chunks[0]);
-
     if app.card_review_mode && !app.cards.is_empty() {
         draw_card_review(frame, app, main_chunks[1]);
     } else {
@@ -8308,43 +5492,19 @@ fn draw_flashcards_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
             draw_bulk_card_actions(frame, app, main_chunks[2]);
         }
     }
-
     if editing {
         let side = layout[1];
-        // Card import help view before editing
         if matches!(app.edit_target, EditTarget::CardImport) && app.show_card_import_help {
             draw_card_import_help(frame, app, side);
         } else if matches!(app.edit_target, EditTarget::CardImport) {
-            // Editing the import path: show editor plus the same buttons row
-            let edit_layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(6), Constraint::Length(3)])
-                .split(side);
-
-            let title = "Import Flashcards - Enter file path, then click 'Start Import'";
+            let edit_layout = Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(6), Constraint::Length(3)]).split(side);
             app.content_edit_area = edit_layout[0];
-            render_textarea_editor(frame, app, edit_layout[0], title);
-
-            // Buttons row reused from help layout
-            let btn_row = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(edit_layout[1]);
-
-            let btn_import = Paragraph::new("Start Import")
-                .block(Block::default().borders(Borders::ALL))
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(Color::Green));
+            render_textarea_editor(frame, app, edit_layout[0], "Import Flashcards - Enter file path, then click 'Start Import'");
+            let btn_row = split_equal_horizontal(edit_layout[1], 2);
+            render_button(frame, "Start Import", btn_row[0], Color::Green);
             app.card_import_help_btn = btn_row[0];
-            frame.render_widget(btn_import, btn_row[0]);
-
-            let btn_edit = Paragraph::new("Edit Path")
-                .block(Block::default().borders(Borders::ALL))
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(Color::Cyan));
+            render_button(frame, "Edit Path", btn_row[1], Color::Cyan);
             app.card_import_edit_btn = btn_row[1];
-            frame.render_widget(btn_edit, btn_row[1]);
-
             app.content_edit_area = side;
         } else {
             let title = match app.edit_target {
@@ -8353,7 +5513,6 @@ fn draw_flashcards_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 EditTarget::CardImport => "Import Flashcards - Enter file path (Ctrl+S to save, Esc to cancel)",
                 _ => "Flashcard Editor",
             };
-
             app.content_edit_area = side;
             render_textarea_editor(frame, app, side, title);
         }
@@ -8367,151 +5526,75 @@ fn matches_filter(app: &App, card: &Card) -> bool {
         CardFilter::All => true,
         CardFilter::New => card.last_reviewed.is_none(),
         CardFilter::Due => card.next_review <= today,
-        CardFilter::Blackout => card.ease_factor < 1.3, // Complete failure, very low ease
-        CardFilter::Hard => card.ease_factor >= 1.3 && card.ease_factor < 1.8, // Difficult
-        CardFilter::Medium => card.ease_factor >= 1.8 && card.ease_factor < 2.3, // Average
-        CardFilter::Easy => card.ease_factor >= 2.3 && card.ease_factor < 2.8, // Good
-        CardFilter::Perfect => card.ease_factor >= 2.8, // Excellent
+        CardFilter::Blackout => card.ease_factor < 1.3,
+        CardFilter::Hard => card.ease_factor >= 1.3 && card.ease_factor < 1.8,
+        CardFilter::Medium => card.ease_factor >= 1.8 && card.ease_factor < 2.3,
+        CardFilter::Easy => card.ease_factor >= 2.3 && card.ease_factor < 2.8,
+        CardFilter::Perfect => card.ease_factor >= 2.8,
         CardFilter::Mastered => card.repetitions >= 5 && card.ease_factor >= 2.5,
         CardFilter::Collection(name) => card.collection.as_ref() == Some(name),
     }
 }
 
 fn unique_collections(app: &App) -> Vec<String> {
-    let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for c in &app.cards {
-        if let Some(name) = &c.collection {
-            if !name.is_empty() {
-                set.insert(name.clone());
-            }
-        }
-    }
-    set.into_iter().collect()
+    app.cards.iter().filter_map(|c| c.collection.as_ref().filter(|n| !n.is_empty()).cloned()).collect::<BTreeSet<_>>().into_iter().collect()
 }
 
+fn step_card_in_filter(app: &App, current: usize, forward: bool) -> usize {
+    if app.cards.is_empty() {
+        return 0;
+    }
+    let total = app.cards.len();
+    for step in 1..=total {
+        let idx = if forward { (current + step) % total } else { (current + total - (step % total)) % total };
+        if matches_filter(app, &app.cards[idx]) {
+            return idx;
+        }
+    }
+    current
+}
 fn next_card_in_filter(app: &App, current: usize) -> usize {
-    if app.cards.is_empty() {
-        return 0;
-    }
-    let total = app.cards.len();
-    for step in 1..=total {
-        let idx = (current + step) % total;
-        if matches_filter(app, &app.cards[idx]) {
-            return idx;
-        }
-    }
-    current
+    step_card_in_filter(app, current, true)
 }
-
 fn prev_card_in_filter(app: &App, current: usize) -> usize {
-    if app.cards.is_empty() {
-        return 0;
-    }
-    let total = app.cards.len();
-    for step in 1..=total {
-        let idx = (current + total - (step % total)) % total;
-        if matches_filter(app, &app.cards[idx]) {
-            return idx;
-        }
-    }
-    current
+    step_card_in_filter(app, current, false)
 }
 
 fn draw_card_controls(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let controls = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(14), // New
-            Constraint::Percentage(14), // Review/List
-            Constraint::Percentage(14), // Edit
-            Constraint::Percentage(14), // Delete
-            Constraint::Percentage(14), // Filter
-            Constraint::Percentage(14), // Import
-            Constraint::Percentage(14), // Stats
-        ])
-        .split(area);
-
-    let new_btn = Paragraph::new("New Card")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Green));
+    let controls = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(14); 7]).split(area);
     app.add_card_btn = controls[0];
-    frame.render_widget(new_btn, controls[0]);
-
-    let review_label = if app.card_review_mode { "List View" } else { "Review Mode" };
-    let review_btn = Paragraph::new(review_label)
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Cyan));
+    render_button(frame, "New Card", controls[0], Color::Green);
     app.review_card_btn = controls[1];
     app.bulk_delete_btn = Rect::default();
     app.bulk_unassign_btn = Rect::default();
-    frame.render_widget(review_btn, controls[1]);
-
-    let edit_btn = Paragraph::new("Edit Flashcard")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Yellow));
+    render_button(frame, if app.card_review_mode { "List View" } else { "Review Mode" }, controls[1], Color::Cyan);
     app.edit_card_btn = controls[2];
-    frame.render_widget(edit_btn, controls[2]);
-
-    let delete_btn = Paragraph::new("Delete Flashcard")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Red));
+    render_button(frame, "Edit Flashcard", controls[2], Color::Yellow);
     app.delete_card_btn = controls[3];
-    frame.render_widget(delete_btn, controls[3]);
-
-    // Filter button
-    let filter_label = match &app.card_filter {
-        CardFilter::All => "Filter: All".to_string(),
-        CardFilter::New => "Filter: New".to_string(),
-        CardFilter::Due => "Filter: Due".to_string(),
-        CardFilter::Blackout => "Filter: Blackout".to_string(),
-        CardFilter::Hard => "Filter: Hard".to_string(),
-        CardFilter::Medium => "Filter: Medium".to_string(),
-        CardFilter::Easy => "Filter: Easy".to_string(),
-        CardFilter::Perfect => "Filter: Perfect".to_string(),
-        CardFilter::Mastered => "Filter: Mastered".to_string(),
-        CardFilter::Collection(name) => format!("Filter: {}", name),
+    render_button(frame, "Delete Flashcard", controls[3], Color::Red);
+    let filter_name = match &app.card_filter {
+        CardFilter::All => "All".to_string(),
+        CardFilter::New => "New".to_string(),
+        CardFilter::Due => "Due".to_string(),
+        CardFilter::Blackout => "Blackout".to_string(),
+        CardFilter::Hard => "Hard".to_string(),
+        CardFilter::Medium => "Medium".to_string(),
+        CardFilter::Easy => "Easy".to_string(),
+        CardFilter::Perfect => "Perfect".to_string(),
+        CardFilter::Mastered => "Mastered".to_string(),
+        CardFilter::Collection(name) => name.clone(),
     };
-    let filter_btn = Paragraph::new(filter_label)
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::LightMagenta));
     app.filter_collection_btn = controls[4];
-    frame.render_widget(filter_btn, controls[4]);
-
-    let import_btn = Paragraph::new("Import Flashcards")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::LightBlue));
+    render_button(frame, &format!("Filter: {}", filter_name), controls[4], Color::LightMagenta);
     app.import_card_btn = controls[5];
-    frame.render_widget(import_btn, controls[5]);
-
-    let visible: Vec<&Card> = app
-        .cards
-        .iter()
-        .filter(|c| matches_filter(app, c))
-        .collect();
-    let due_cards: usize = visible.iter().filter(|c| c.is_due()).count();
+    render_button(frame, "Import Flashcards", controls[5], Color::LightBlue);
+    let visible: Vec<&Card> = app.cards.iter().filter(|c| matches_filter(app, c)).collect();
     let stats = match &app.card_filter {
-        CardFilter::All => format!("Due: {} / Total: {}", due_cards, app.cards.len()),
-        CardFilter::New => format!("New: {}", visible.len()),
-        CardFilter::Due => format!("Due: {}", visible.len()),
-        CardFilter::Blackout => format!("Blackout: {}", visible.len()),
-        CardFilter::Hard => format!("Hard: {}", visible.len()),
-        CardFilter::Medium => format!("Medium: {}", visible.len()),
-        CardFilter::Easy => format!("Easy: {}", visible.len()),
-        CardFilter::Perfect => format!("Perfect: {}", visible.len()),
-        CardFilter::Mastered => format!("Mastered: {}", visible.len()),
+        CardFilter::All => format!("Due: {} / Total: {}", visible.iter().filter(|c| c.is_due()).count(), app.cards.len()),
         CardFilter::Collection(name) => format!("{}: {} cards", name, visible.len()),
+        _ => format!("{}: {}", filter_name, visible.len()),
     };
-    let stats_widget = Paragraph::new(stats)
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::White));
-    frame.render_widget(stats_widget, controls[6]);
+    render_button(frame, &stats, controls[6], Color::White);
 }
 
 fn draw_bulk_card_actions(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
@@ -8520,61 +5603,33 @@ fn draw_bulk_card_actions(frame: &mut ratatui::Frame, app: &mut App, area: Rect)
         app.bulk_unassign_btn = Rect::default();
         return;
     }
-
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
+    let chunks = split_equal_horizontal(area, 2);
     let selected_count = app.selected_card_indices.len();
     let using_filter = matches!(app.card_filter, CardFilter::Collection(_));
-
-    let (delete_hint, delete_style) = if selected_count > 0 {
-        (format!(" ({} selected)", selected_count), Style::default().fg(Color::Red))
-    } else if using_filter {
-        (" (entire collection)".to_string(), Style::default().fg(Color::Red))
-    } else {
-        (" (select cards first)".to_string(), Style::default().fg(Color::DarkGray))
+    let hint_for = |color: Color| -> (String, Style) {
+        if selected_count > 0 {
+            (format!(" ({} selected)", selected_count), Style::default().fg(color))
+        } else if using_filter {
+            (" (entire collection)".to_string(), Style::default().fg(color))
+        } else {
+            (" (select cards first)".to_string(), Style::default().fg(Color::DarkGray))
+        }
     };
-
-    let delete_btn = Paragraph::new(format!("Bulk Delete{}", delete_hint))
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(delete_style);
+    let (dh, ds) = hint_for(Color::Red);
+    render_styled_button(frame, &format!("Bulk Delete{}", dh), chunks[0], ds);
     app.bulk_delete_btn = chunks[0];
-    frame.render_widget(delete_btn, chunks[0]);
-
-    let (dis_hint, dis_style) = if selected_count > 0 {
-        (format!(" ({} selected)", selected_count), Style::default().fg(Color::Yellow))
-    } else if using_filter {
-        (" (entire collection)".to_string(), Style::default().fg(Color::Yellow))
-    } else {
-        (" (select cards first)".to_string(), Style::default().fg(Color::DarkGray))
-    };
-
-    let dis_btn = Paragraph::new(format!("Bulk Disassociate{}", dis_hint))
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(dis_style);
+    let (uh, us) = hint_for(Color::Yellow);
+    render_styled_button(frame, &format!("Bulk Disassociate{}", uh), chunks[1], us);
     app.bulk_unassign_btn = chunks[1];
-    frame.render_widget(dis_btn, chunks[1]);
 }
 
 fn bulk_target_indices(app: &App) -> HashSet<usize> {
     if !app.selected_card_indices.is_empty() {
         return app.selected_card_indices.iter().copied().collect();
     }
-
     if let CardFilter::Collection(name) = &app.card_filter {
-        return app
-            .cards
-            .iter()
-            .enumerate()
-            .filter(|(_, card)| card.collection.as_deref() == Some(name.as_str()))
-            .map(|(idx, _)| idx)
-            .collect();
+        return app.cards.iter().enumerate().filter(|(_, c)| c.collection.as_deref() == Some(name.as_str())).map(|(idx, _)| idx).collect();
     }
-
     HashSet::new()
 }
 
@@ -8583,7 +5638,6 @@ fn bulk_delete_cards(app: &mut App) {
     if targets.is_empty() {
         return;
     }
-
     let mut idx = 0;
     app.cards.retain(|_| {
         let keep = !targets.contains(&idx);
@@ -8600,7 +5654,6 @@ fn bulk_disassociate_cards(app: &mut App) {
     if targets.is_empty() {
         return;
     }
-
     let mut changed = false;
     for (idx, card) in app.cards.iter_mut().enumerate() {
         if targets.contains(&idx) && card.collection.is_some() {
@@ -8616,22 +5669,11 @@ fn bulk_disassociate_cards(app: &mut App) {
 
 fn draw_card_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     app.card_items.clear();
-
-    let visible: Vec<(usize, &Card)> = app
-        .cards
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| matches_filter(app, c))
-        .collect();
-
+    let visible: Vec<(usize, &Card)> = app.cards.iter().enumerate().filter(|(_, c)| matches_filter(app, c)).collect();
     let items: Vec<ListItem> = visible
         .iter()
         .map(|(idx, card)| {
-            let status = if card.is_due() {
-                "⚠ DUE"
-            } else {
-                "✓"
-            };
+            let status = if card.is_due() { "⚠ DUE" } else { "✓" };
             let type_label = match card.card_type {
                 CardType::Basic => "Basic",
                 CardType::Cloze => "Cloze",
@@ -8639,7 +5681,6 @@ fn draw_card_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
             };
             let front_preview: String = card.front.chars().take(50).collect();
             let text = format!("[{}] {} | {} | Interval: {}d", status, type_label, front_preview, card.interval);
-            
             let mut style = if *idx == app.current_card_idx {
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
             } else if card.is_due() {
@@ -8647,304 +5688,146 @@ fn draw_card_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
             } else {
                 Style::default().fg(Color::Green)
             };
-
             if app.selected_card_indices.contains(idx) {
                 style = style.bg(Color::DarkGray).add_modifier(Modifier::REVERSED);
             }
-
             ListItem::new(text).style(style)
         })
         .collect();
-
-    let list = List::new(items).block(
-        Block::default()
-            .title("Flashcards (Up/Down to navigate, Enter to review)")
-            .borders(Borders::ALL),
-    );
-
-    frame.render_widget(list, area);
-
-    // Store clickable areas
+    frame.render_widget(List::new(items).block(Block::default().title("Flashcards (Up/Down to navigate, Enter to review)").borders(Borders::ALL)), area);
     for (idx, _) in visible.iter() {
-        let item_rect = Rect {
-            x: area.x + 1,
-            y: area.y + 1 + (app.card_items.len() as u16),
-            width: area.width.saturating_sub(2),
-            height: 1,
-        };
-        app.card_items.push((*idx, item_rect));
+        app.card_items.push((*idx, Rect { x: area.x + 1, y: area.y + 1 + app.card_items.len() as u16, width: area.width.saturating_sub(2), height: 1 }));
     }
 }
 
 fn draw_card_review(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     if app.cards.is_empty() || app.current_card_idx >= app.cards.len() {
-        let msg = Paragraph::new("No flashcards to review")
-            .block(Block::default().borders(Borders::ALL))
-            .alignment(Alignment::Center);
-        frame.render_widget(msg, area);
+        frame.render_widget(Paragraph::new("No flashcards to review").block(Block::default().borders(Borders::ALL)).alignment(Alignment::Center), area);
         return;
     }
-
     if !matches_filter(app, &app.cards[app.current_card_idx]) {
-        // pick first visible card in filter or show empty
-        if let Some((first_idx, _)) = app
-            .cards
-            .iter()
-            .enumerate()
-            .find(|(_, c)| matches_filter(app, c))
-        {
+        if let Some((first_idx, _)) = app.cards.iter().enumerate().find(|(_, c)| matches_filter(app, c)) {
             app.current_card_idx = first_idx;
         } else {
-            let msg = Paragraph::new("No flashcards match this filter")
-                .block(Block::default().borders(Borders::ALL))
-                .alignment(Alignment::Center);
-            frame.render_widget(msg, area);
+            frame.render_widget(Paragraph::new("No flashcards match this filter").block(Block::default().borders(Borders::ALL)).alignment(Alignment::Center), area);
             return;
         }
     }
-
     let card = &app.cards[app.current_card_idx];
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(40),
-            Constraint::Length(3),
-            Constraint::Percentage(40),
-            Constraint::Length(3),
-        ])
-        .split(area);
-
-    // Front
-    let front_text = format!("FRONT:\n\n{}", card.front);
-    let front_widget = Paragraph::new(front_text)
-        .block(Block::default()
-            .title(format!("Card Type: {:?}", card.card_type))
-            .borders(Borders::ALL))
-        .wrap(Wrap { trim: false })
-        .style(Style::default().fg(Color::Cyan));
-    frame.render_widget(front_widget, chunks[0]);
-
-    // Show answer button
-    let show_btn_text = if app.show_card_answer { "Answer Shown ✓" } else { "Show Answer (Space)" };
-    let show_btn = Paragraph::new(show_btn_text)
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(if app.show_card_answer {
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Yellow)
-        });
+    let chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Percentage(40), Constraint::Length(3), Constraint::Percentage(40), Constraint::Length(3)]).split(area);
+    frame.render_widget(Paragraph::new(format!("FRONT:\n\n{}", card.front)).block(Block::default().title(format!("Card Type: {:?}", card.card_type)).borders(Borders::ALL)).wrap(Wrap { trim: false }).style(Style::default().fg(Color::Cyan)), chunks[0]);
+    let (show_btn_text, show_style) = if app.show_card_answer { ("Answer Shown ✓", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)) } else { ("Show Answer (Space)", Style::default().fg(Color::Yellow)) };
+    render_styled_button(frame, show_btn_text, chunks[1], show_style);
     app.show_answer_btn = chunks[1];
-    frame.render_widget(show_btn, chunks[1]);
-
-    // Back (only if revealed)
     if app.show_card_answer {
-        let back_text = format!("BACK:\n\n{}", card.back);
-        let back_widget = Paragraph::new(back_text)
-            .block(Block::default()
-                .title(format!("Next review: {} | Ease: {:.2}", card.next_review, card.ease_factor))
-                .borders(Borders::ALL))
-            .wrap(Wrap { trim: false })
-            .style(Style::default().fg(Color::Green));
-        frame.render_widget(back_widget, chunks[2]);
-
-        // Quality rating buttons
+        frame.render_widget(Paragraph::new(format!("BACK:\n\n{}", card.back)).block(Block::default().title(format!("Next review: {} | Ease: {:.2}", card.next_review, card.ease_factor)).borders(Borders::ALL)).wrap(Wrap { trim: false }).style(Style::default().fg(Color::Green)), chunks[2]);
         draw_quality_buttons(frame, app, chunks[3]);
     } else {
-        let placeholder = Paragraph::new("[Answer hidden - press Space to reveal]")
-            .block(Block::default().borders(Borders::ALL))
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(placeholder, chunks[2]);
+        frame.render_widget(Paragraph::new("[Answer hidden - press Space to reveal]").block(Block::default().borders(Borders::ALL)).alignment(Alignment::Center).style(Style::default().fg(Color::DarkGray)), chunks[2]);
     }
 }
 
-// Render import help with instructions and a button to start editing the path
 fn draw_card_import_help(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(7), Constraint::Length(3)])
-        .split(area);
-
-    let mut lines = Vec::new();
-    lines.push(Line::from(Span::styled(
-        "Import Flashcards - Help",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(""));
-    lines.push(Line::from("Supported formats: .json or .csv"));
-    lines.push(Line::from("Paths: absolute or ~ (home)"));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("JSON format (array of objects):", Style::default().fg(Color::Cyan))));
-    lines.push(Line::from("  [{"));
-    lines.push(Line::from("    \"front\": \"Question\","));
-    lines.push(Line::from("    \"back\": \"Answer\","));
-    lines.push(Line::from("    \"card_type\": \"basic|cloze|mc\","));
-    lines.push(Line::from("    \"collection\": \"optional-name\""));
-    lines.push(Line::from("  }]"));
-    lines.push(Line::from("card_type is case-insensitive; defaults to basic if missing."));
-    lines.push(Line::from("collection is optional; other fields are ignored."));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("CSV format: front,back,type,collection", Style::default().fg(Color::Cyan))));
-    lines.push(Line::from("Example lines:"));
-    lines.push(Line::from("  Front text,Back text,basic,MyDeck"));
-    lines.push(Line::from("  Cloze {{c1:gap}}?,Hidden text,cloze,Spanish"));
-    lines.push(Line::from("type accepts basic|cloze|mc (case-insensitive). Extra columns are ignored."));
-    lines.push(Line::from(""));
-    lines.push(Line::from("Import steps:"));
-    lines.push(Line::from("  1) Click 'Edit Path'"));
-    lines.push(Line::from("  2) Enter the file path (json/csv)"));
-    lines.push(Line::from("  3) Click 'Start Import' to import"));
-    lines.push(Line::from("Imported cards are appended; use filters/collections as usual."));
-
-    let help = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .title("Import Flashcards (read mode) - Click button to edit path")
-                .borders(Borders::ALL),
-        )
-        .wrap(Wrap { trim: true })
-        .scroll((app.card_import_help_scroll, 0));
-
-    frame.render_widget(help, layout[0]);
-       app.card_import_help_text_area = layout[0];
-
-    let btn_row = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(layout[1]);
-
-    let btn_import = Paragraph::new("Start Import")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Green));
+    let layout = Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(7), Constraint::Length(3)]).split(area);
+    let body = "Supported formats: .json or .csv\nPaths: absolute or ~ (home)\n\nJSON format (array of objects):\n  [{\n    \"front\": \"Question\",\n    \"back\": \"Answer\",\n    \"card_type\": \"basic|cloze|mc\",\n    \"collection\": \"optional-name\"\n  }]\ncard_type is case-insensitive; defaults to basic if missing.\ncollection is optional; other fields are ignored.\n\nCSV format: front,back,type,collection\nExample lines:\n  Front text,Back text,basic,MyDeck\n  Cloze {{c1:gap}}?,Hidden text,cloze,Spanish\ntype accepts basic|cloze|mc (case-insensitive). Extra columns are ignored.\n\nImport steps:\n  1) Click 'Edit Path'\n  2) Enter the file path (json/csv)\n  3) Click 'Start Import' to import\nImported cards are appended; use filters/collections as usual.";
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled("Import Flashcards - Help", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))), Line::from("")];
+    lines.extend(body.lines().map(Line::from));
+    frame.render_widget(Paragraph::new(lines).block(Block::default().title("Import Flashcards (read mode) - Click button to edit path").borders(Borders::ALL)).wrap(Wrap { trim: true }).scroll((app.card_import_help_scroll, 0)), layout[0]);
+    app.card_import_help_text_area = layout[0];
+    let btn_row = split_equal_horizontal(layout[1], 2);
+    render_button(frame, "Start Import", btn_row[0], Color::Green);
     app.card_import_help_btn = btn_row[0];
-    frame.render_widget(btn_import, btn_row[0]);
-
-    let btn_edit = Paragraph::new("Edit Path")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Cyan));
+    render_button(frame, "Edit Path", btn_row[1], Color::Cyan);
     app.card_import_edit_btn = btn_row[1];
-    frame.render_widget(btn_edit, btn_row[1]);
-
     app.content_edit_area = area;
 }
 
 fn draw_quality_buttons(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     app.quality_btns.clear();
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(16),
-            Constraint::Percentage(16),
-            Constraint::Percentage(17),
-            Constraint::Percentage(17),
-            Constraint::Percentage(17),
-            Constraint::Percentage(17),
-        ])
-        .split(area);
-
-    let labels = [
-        ("0: Blackout", Color::Red),
-        ("1: Wrong", Color::LightRed),
-        ("2: Hard", Color::Yellow),
-        ("3: Good", Color::LightGreen),
-        ("4: Easy", Color::Green),
-        ("5: Perfect", Color::Cyan),
-    ];
-
+    let chunks = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(16), Constraint::Percentage(16), Constraint::Percentage(17), Constraint::Percentage(17), Constraint::Percentage(17), Constraint::Percentage(17)]).split(area);
+    let labels = [("0: Blackout", Color::Red), ("1: Wrong", Color::LightRed), ("2: Hard", Color::Yellow), ("3: Good", Color::LightGreen), ("4: Easy", Color::Green), ("5: Perfect", Color::Cyan)];
     for (idx, ((label, color), chunk)) in labels.iter().zip(chunks.iter()).enumerate() {
-        let btn = Paragraph::new(*label)
-            .block(Block::default().borders(Borders::ALL))
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(*color));
         app.quality_btns.push((idx as u8, *chunk));
-        frame.render_widget(btn, *chunk);
+        render_button(frame, label, *chunk, *color);
+    }
+}
+
+fn cycle_card_filter(app: &App, f: &CardFilter) -> CardFilter {
+    match f {
+        CardFilter::All => CardFilter::New,
+        CardFilter::New => CardFilter::Due,
+        CardFilter::Due => CardFilter::Blackout,
+        CardFilter::Blackout => CardFilter::Hard,
+        CardFilter::Hard => CardFilter::Medium,
+        CardFilter::Medium => CardFilter::Easy,
+        CardFilter::Easy => CardFilter::Perfect,
+        CardFilter::Perfect => CardFilter::Mastered,
+        CardFilter::Mastered => {
+            let mut cols = unique_collections(app);
+            cols.sort();
+            cols.first().map(|c| CardFilter::Collection(c.clone())).unwrap_or(CardFilter::All)
+        }
+        CardFilter::Collection(cur) => {
+            let mut cols = unique_collections(app);
+            cols.sort();
+            cols.iter().position(|c| c == cur).and_then(|p| cols.get(p + 1).cloned().map(CardFilter::Collection)).unwrap_or(CardFilter::All)
+        }
     }
 }
 
 fn handle_flashcards_mouse_left(app: &mut App, mouse: MouseEvent) {
-    // Handle textarea mouse clicks for editing
     handle_textarea_mouse_click(app, mouse);
-    
-    // Only process button clicks on Down events to avoid double-triggering
     let is_click = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
-    
-    let editing_flashcards = app.is_editing()
-        && matches!(app.edit_target, EditTarget::CardNew | EditTarget::CardEdit | EditTarget::CardImport);
-
-    // Control buttons - only respond to Down events
-    if is_click && inside_rect(mouse, app.add_card_btn) {
-        app.card_review_mode = false;
-        let template = new_card_editor_template();
-        start_editing(app, EditTarget::CardNew, template);
-        // Position cursor at end of front text line
-        app.textarea.move_cursor(CursorMove::Head);
-        app.textarea.move_cursor(CursorMove::End);
+    if !is_click {
         return;
     }
-    
-    if is_click && inside_rect(mouse, app.review_card_btn) {
+    let editing_flashcards = app.is_editing() && matches!(app.edit_target, EditTarget::CardNew | EditTarget::CardEdit | EditTarget::CardImport);
+    if inside_rect(mouse, app.add_card_btn) {
+        app.card_review_mode = false;
+        start_edit_head_end(app, EditTarget::CardNew, new_card_editor_template());
+        return;
+    }
+    if inside_rect(mouse, app.review_card_btn) {
         app.card_review_mode = !app.card_review_mode;
         app.show_card_answer = false;
         app.clear_card_selection();
         return;
     }
-
-    if !app.card_review_mode && is_click && inside_rect(mouse, app.bulk_delete_btn) {
+    if !app.card_review_mode && inside_rect(mouse, app.bulk_delete_btn) {
         bulk_delete_cards(app);
         return;
     }
-
-    if !app.card_review_mode && is_click && inside_rect(mouse, app.bulk_unassign_btn) {
+    if !app.card_review_mode && inside_rect(mouse, app.bulk_unassign_btn) {
         bulk_disassociate_cards(app);
         return;
     }
-
-    if is_click && inside_rect(mouse, app.edit_card_btn) && app.current_card_idx < app.cards.len() {
-        let card = &app.cards[app.current_card_idx];
-        let content = format_card_editor_content(card);
+    if inside_rect(mouse, app.edit_card_btn) && app.current_card_idx < app.cards.len() {
+        let content = format_card_editor_content(&app.cards[app.current_card_idx]);
         app.card_review_mode = false;
-        start_editing(app, EditTarget::CardEdit, content);
-        // Position cursor at end of front text line
-        app.textarea.move_cursor(CursorMove::Head);
-        app.textarea.move_cursor(CursorMove::End);
+        start_edit_head_end(app, EditTarget::CardEdit, content);
         return;
     }
-
-    if is_click && inside_rect(mouse, app.delete_card_btn) && !app.cards.is_empty() {
+    if inside_rect(mouse, app.delete_card_btn) && !app.cards.is_empty() {
         delete_and_adjust_index(&mut app.cards, &mut app.current_card_idx);
         app.clear_card_selection();
         let _ = save_app_data(app);
         return;
     }
-
-    if is_click && inside_rect(mouse, app.import_card_btn) {
+    if inside_rect(mouse, app.import_card_btn) {
         app.card_review_mode = false;
         app.show_card_import_help = true;
-        // Keep edit target as CardImport to render the help panel, but do not start editing input yet
         app.edit_target = EditTarget::CardImport;
         return;
     }
-
-    // Start Import button (visible in help/edit modes)
-    if is_click && inside_rect(mouse, app.card_import_help_btn) {
-        // Use pending path if saved via Ctrl+S; otherwise use live editing input
-        let path = app
-            .pending_card_import_path
-            .clone()
-            .unwrap_or_else(|| app.editing_input.trim().to_string());
-
+    if inside_rect(mouse, app.card_import_help_btn) {
+        let path = app.pending_card_import_path.clone().unwrap_or_else(|| app.editing_input.trim().to_string());
         if path.trim().is_empty() {
             app.show_validation_error = true;
             app.validation_error_message = "Enter a JSON/CSV file path first (use Edit Path).".to_string();
             return;
         }
-
         match import_cards_from_file(app, path.trim()) {
             Ok(count) => {
-                // Exit help/edit mode and show list view
                 app.card_review_mode = false;
                 app.show_card_import_help = false;
                 app.edit_target = EditTarget::None;
@@ -8964,91 +5847,30 @@ fn handle_flashcards_mouse_left(app: &mut App, mouse: MouseEvent) {
         }
         return;
     }
-
-    // Edit Path button (visible in help/edit modes)
-    if is_click && inside_rect(mouse, app.card_import_edit_btn) {
+    if inside_rect(mouse, app.card_import_edit_btn) || (app.show_card_import_help && inside_rect(mouse, app.card_import_help_text_area)) {
         app.show_card_import_help = false;
-        let initial = app
-            .pending_card_import_path
-            .clone()
-            .unwrap_or_else(|| app.editing_input.clone());
+        let initial = app.pending_card_import_path.clone().unwrap_or_else(|| app.editing_input.clone());
         start_editing(app, EditTarget::CardImport, initial);
         return;
     }
-
-    // Click on help text area itself to transition to edit mode (only when help is shown)
-    if is_click && app.show_card_import_help && inside_rect(mouse, app.card_import_help_text_area) {
-        app.show_card_import_help = false;
-        let initial = app
-            .pending_card_import_path
-            .clone()
-            .unwrap_or_else(|| app.editing_input.clone());
-        start_editing(app, EditTarget::CardImport, initial);
-        return;
-    }
-
-    // Filter button cycles: All -> New -> Due -> Difficulty levels -> Mastered -> Collections -> All
-
-    if is_click && inside_rect(mouse, app.filter_collection_btn) {
-        app.card_filter = match &app.card_filter {
-            CardFilter::All => CardFilter::New,
-            CardFilter::New => CardFilter::Due,
-            CardFilter::Due => CardFilter::Blackout,
-            CardFilter::Blackout => CardFilter::Hard,
-            CardFilter::Hard => CardFilter::Medium,
-            CardFilter::Medium => CardFilter::Easy,
-            CardFilter::Easy => CardFilter::Perfect,
-            CardFilter::Perfect => CardFilter::Mastered,
-            CardFilter::Mastered => {
-                // Move to first collection if any exist
-                let mut cols = unique_collections(app);
-                cols.sort();
-                if let Some(first) = cols.first() {
-                    CardFilter::Collection(first.clone())
-                } else {
-                    CardFilter::All
-                }
-            }
-            CardFilter::Collection(current) => {
-                // Cycle through collections, then back to All
-                let mut cols = unique_collections(app);
-                cols.sort();
-                if let Some(pos) = cols.iter().position(|c| c == current) {
-                    if pos + 1 < cols.len() {
-                        CardFilter::Collection(cols[pos + 1].clone())
-                    } else {
-                        CardFilter::All
-                    }
-                } else {
-                    // Current collection no longer exists
-                    CardFilter::All
-                }
-            }
-        };
+    if inside_rect(mouse, app.filter_collection_btn) {
+        app.card_filter = cycle_card_filter(app, &app.card_filter.clone());
         app.clear_card_selection();
         return;
     }
-
-    // Assign collection for current card
-    // When editing flashcards, ignore the rest of the buttons to avoid unexpected state changes
     if editing_flashcards {
         return;
     }
-
-    // Show answer button
-    if is_click && app.card_review_mode && inside_rect(mouse, app.show_answer_btn) {
+    if app.card_review_mode && inside_rect(mouse, app.show_answer_btn) {
         app.show_card_answer = true;
         return;
     }
-
-    // Quality buttons (only when answer is shown)
-    if is_click && app.card_review_mode && app.show_card_answer {
+    if app.card_review_mode && app.show_card_answer {
         for (quality, rect) in app.quality_btns.clone() {
             if inside_rect(mouse, rect) {
                 if let Some(card) = app.cards.get_mut(app.current_card_idx) {
                     card.review(quality);
                     app.show_card_answer = false;
-                    // Move to next card within filter
                     app.current_card_idx = next_card_in_filter(app, app.current_card_idx);
                     let _ = save_app_data(app);
                 }
@@ -9056,23 +5878,16 @@ fn handle_flashcards_mouse_left(app: &mut App, mouse: MouseEvent) {
             }
         }
     }
-
-    // Card list items - single click to select, double click to enter review
-    if is_click {
-        for (idx, rect) in app.card_items.clone() {
-            if inside_rect(mouse, rect) {
-                // Check if this is a double-click (same card clicked twice in quick succession)
-                let is_double_click = app.current_card_idx == idx && mouse.kind == MouseEventKind::Down(MouseButton::Left);
-                app.clear_card_selection();
-                app.current_card_idx = idx;
-                if is_double_click {
-                    // Double click -> enter review mode
-                    app.card_review_mode = true;
-                    app.show_card_answer = false;
-                }
-                // Single click just selects/highlights
-                return;
+    for (idx, rect) in app.card_items.clone() {
+        if inside_rect(mouse, rect) {
+            let is_double = app.current_card_idx == idx;
+            app.clear_card_selection();
+            app.current_card_idx = idx;
+            if is_double {
+                app.card_review_mode = true;
+                app.show_card_answer = false;
             }
+            return;
         }
     }
 }
@@ -9106,17 +5921,11 @@ fn import_cards_json(app: &mut App, path: &std::path::Path) -> Result<usize> {
     let mut count = 0;
 
     for entry in entries {
-        let ct = entry
-            .card_type
-            .as_deref()
-            .unwrap_or("basic")
-            .trim()
-            .to_lowercase();
+        let ct = entry.card_type.as_deref().unwrap_or("basic").trim().to_lowercase();
         let card_type = match ct.as_str() {
             "basic" | "frontback" | "front_back" => CardType::Basic,
             "cloze" => CardType::Cloze,
-            "mc" | "multiplechoice" | "multiple choice" | "multiple_choice" =>
-                CardType::MultipleChoice,
+            "mc" | "multiplechoice" | "multiple choice" | "multiple_choice" => CardType::MultipleChoice,
             _ => CardType::Basic,
         };
 
@@ -9127,11 +5936,7 @@ fn import_cards_json(app: &mut App, path: &std::path::Path) -> Result<usize> {
             }
         }
         if let Some(tags) = entry.tags {
-            let cleaned: Vec<String> = tags
-                .into_iter()
-                .filter(|t| !t.trim().is_empty())
-                .map(|t| t.trim().to_string())
-                .collect();
+            let cleaned: Vec<String> = tags.into_iter().filter(|t| !t.trim().is_empty()).map(|t| t.trim().to_string()).collect();
             if !cleaned.is_empty() {
                 card.tags = cleaned;
             }
@@ -9144,10 +5949,7 @@ fn import_cards_json(app: &mut App, path: &std::path::Path) -> Result<usize> {
 }
 
 fn import_cards_csv(app: &mut App, path: &std::path::Path) -> Result<usize> {
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .flexible(true)
-        .from_path(path)?;
+    let mut reader = csv::ReaderBuilder::new().has_headers(true).flexible(true).from_path(path)?;
     let mut count = 0;
 
     for result in reader.records() {
@@ -9203,10 +6005,7 @@ fn import_cards_csv(app: &mut App, path: &std::path::Path) -> Result<usize> {
 }
 
 fn draw_journal_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(5)])
-        .split(area);
+    let chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(3), Constraint::Min(5)]).split(area);
 
     if matches!(app.journal_view, JournalView::Entry) {
         draw_journal_navigation(frame, app, chunks[0]);
@@ -9218,94 +6017,32 @@ fn draw_journal_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_journal_navigation(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(18),
-            Constraint::Percentage(18),
-            Constraint::Percentage(18),
-            Constraint::Percentage(28),
-            Constraint::Percentage(18),
-        ])
-        .split(area);
-
-    let mistake_btn = Paragraph::new("Mistake Book")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Magenta));
+    let chunks = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(18), Constraint::Percentage(18), Constraint::Percentage(18), Constraint::Percentage(28), Constraint::Percentage(18)]).split(area);
+    render_button(frame, "Mistake Book", chunks[0], Color::Magenta);
     app.mistake_book_btn = chunks[0];
-    frame.render_widget(mistake_btn, chunks[0]);
-
-    let prev_btn = Paragraph::new("Previous Day")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Cyan));
+    render_button(frame, "Previous Day", chunks[1], Color::Cyan);
     app.prev_day_btn = chunks[1];
-    frame.render_widget(prev_btn, chunks[1]);
-
-    let next_btn = Paragraph::new("Next Day")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Cyan));
+    render_button(frame, "Next Day", chunks[2], Color::Cyan);
     app.next_day_btn = chunks[2];
-    frame.render_widget(next_btn, chunks[2]);
-
-    let date_display = Paragraph::new(format!("Date {}", app.current_journal_date))
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
+    render_styled_button(frame, &format!("Date {}", app.current_journal_date), chunks[3], Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
     app.date_btn = chunks[3];
-    frame.render_widget(date_display, chunks[3]);
-
-    let today_btn = Paragraph::new("Jump to Today")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Green));
+    render_button(frame, "Jump to Today", chunks[4], Color::Green);
     app.today_btn = chunks[4];
-    frame.render_widget(today_btn, chunks[4]);
+}
+
+fn render_styled_button(frame: &mut ratatui::Frame, label: &str, area: Rect, style: Style) {
+    frame.render_widget(Paragraph::new(label).block(Block::default().borders(Borders::ALL)).alignment(Alignment::Center).style(style), area);
 }
 
 fn draw_mistake_book_header(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
-    let list_style = if matches!(app.journal_view, JournalView::MistakeList) {
-        Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Cyan)
-    };
-
-    let log_style = if matches!(app.journal_view, JournalView::MistakeLog) {
-        Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Yellow)
-    };
-
-    let list_btn = Paragraph::new("List")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(list_style);
+    let chunks = split_equal_horizontal(area, 2);
+    let active = Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD);
+    let list_style = if matches!(app.journal_view, JournalView::MistakeList) { active } else { Style::default().fg(Color::Cyan) };
+    let log_style = if matches!(app.journal_view, JournalView::MistakeLog) { active } else { Style::default().fg(Color::Yellow) };
+    render_styled_button(frame, "List", chunks[0], list_style);
     app.mistake_list_btn = chunks[0];
-    frame.render_widget(list_btn, chunks[0]);
-
-    let log_btn = Paragraph::new("Log")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(log_style);
+    render_styled_button(frame, "Log", chunks[1], log_style);
     app.mistake_log_btn = chunks[1];
-    frame.render_widget(log_btn, chunks[1]);
 }
 
 fn draw_mistake_book_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
@@ -9324,291 +6061,80 @@ fn draw_mistake_book_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect)
     app.mistake_list_dates = dates.clone();
 
     if dates.is_empty() {
-        let help_text = vec![
-            Line::from(""),
-            Line::from("Mistake Book - No entries yet"),
-            Line::from(""),
-            Line::from("How to use:"),
-            Line::from("  1. Click Log to write about today's mistake"),
-            Line::from("  2. Note the pitfall and how to improve"),
-            Line::from("  3. Return here to review past mistakes"),
-        ];
-
-        let panel = Paragraph::new(help_text)
-            .block(Block::default().title("Mistake Book").borders(Borders::ALL))
-            .style(Style::default().fg(Color::Gray));
-        frame.render_widget(panel, area);
+        let help = "\nMistake Book - No entries yet\n\nHow to use:\n  1. Click Log to write about today's mistake\n  2. Note the pitfall and how to improve\n  3. Return here to review past mistakes";
+        frame.render_widget(Paragraph::new(help).block(Block::default().title("Mistake Book").borders(Borders::ALL)).style(Style::default().fg(Color::Gray)), area);
         return;
     }
-
-    let current_idx = dates
-        .iter()
-        .position(|d| *d == app.current_mistake_date)
-        .unwrap_or(0);
-    let items_iter = dates
-        .iter()
-        .enumerate()
-        .map(|(idx, d)| (idx, d.to_string(), false))
-        .collect::<Vec<_>>();
+    let current_idx = dates.iter().position(|d| *d == app.current_mistake_date).unwrap_or(0);
+    let items_iter = dates.iter().enumerate().map(|(idx, d)| (idx, d.to_string(), false)).collect::<Vec<_>>();
     let items = build_list_items(items_iter, current_idx, area, &mut app.mistake_list_items);
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .title("Mistake Book - Logged Days")
-                .borders(Borders::ALL),
-        )
-        .style(Style::default().fg(Color::White));
-    frame.render_widget(list, area);
+    frame.render_widget(List::new(items).block(Block::default().title("Mistake Book - Logged Days").borders(Borders::ALL)).style(Style::default().fg(Color::White)), area);
 }
 
 fn draw_mistake_book_log(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(5)])
-        .split(area);
-
+    let chunks = Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(3), Constraint::Min(5)]).split(area);
     draw_mistake_date_navigation(frame, app, chunks[0]);
-
-    let entry = app
-        .mistake_entries
-        .iter()
-        .find(|e| e.date == app.current_mistake_date)
-        .cloned();
-
+    let entry = app.mistake_entries.iter().find(|e| e.date == app.current_mistake_date).cloned();
+    let title = format!("Mistake Book - {}", app.current_mistake_date);
+    app.content_edit_area = chunks[1];
     if app.is_editing() && matches!(app.edit_target, EditTarget::MistakeEntry) {
-        let title = format!(
-            "Mistake Book - {} (Ctrl+S to save, Esc to cancel)",
-            app.current_mistake_date
-        );
-        app.content_edit_area = chunks[1];
-        render_textarea_editor(frame, app, chunks[1], &title);
+        render_textarea_editor(frame, app, chunks[1], &format!("{} (Ctrl+S to save, Esc to cancel)", title));
     } else if entry.is_none() {
-        let help_text = vec![
-            Line::from(""),
-            Line::from("Mistake Book - Daily Reflection"),
-            Line::from(""),
-            Line::from("Log a mistake of the day:"),
-            Line::from("  - What happened?"),
-            Line::from("  - What can I improve?"),
-            Line::from("  - What should I practice to avoid it?"),
-            Line::from(""),
-            Line::from("Click here to start writing."),
-        ];
-
-        let panel = Paragraph::new(help_text)
-            .block(
-                Block::default()
-                    .title(format!("Mistake Book - {}", app.current_mistake_date))
-                    .borders(Borders::ALL),
-            )
-            .style(Style::default().fg(Color::Gray));
-        app.content_edit_area = chunks[1];
-        frame.render_widget(panel, chunks[1]);
+        let help = "\nMistake Book - Daily Reflection\n\nLog a mistake of the day:\n  - What happened?\n  - What can I improve?\n  - What should I practice to avoid it?\n\nClick here to start writing.";
+        frame.render_widget(Paragraph::new(help).block(Block::default().title(title).borders(Borders::ALL)).style(Style::default().fg(Color::Gray)), chunks[1]);
     } else {
-        let content = entry
-            .as_ref()
-            .map(|e| e.content.clone())
-            .unwrap_or_else(|| "(Click to write in your mistake book)".to_string());
-
-        let panel = Paragraph::new(content)
-            .block(
-                Block::default()
-                    .title(format!("Mistake Book - {}", app.current_mistake_date))
-                    .borders(Borders::ALL),
-            )
-            .wrap(Wrap { trim: false });
-        app.content_edit_area = chunks[1];
-        frame.render_widget(panel, chunks[1]);
+        let content = entry.as_ref().map(|e| e.content.clone()).unwrap_or_else(|| "(Click to write in your mistake book)".to_string());
+        frame.render_widget(Paragraph::new(content).block(Block::default().title(title).borders(Borders::ALL)).wrap(Wrap { trim: false }), chunks[1]);
     }
 }
 
 fn draw_mistake_date_navigation(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(22),
-            Constraint::Percentage(22),
-            Constraint::Percentage(34),
-            Constraint::Percentage(22),
-        ])
-        .split(area);
-
-    let prev_btn = Paragraph::new("Previous Day")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Cyan));
+    let chunks = Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(22), Constraint::Percentage(22), Constraint::Percentage(34), Constraint::Percentage(22)]).split(area);
     app.prev_day_btn = chunks[0];
-    frame.render_widget(prev_btn, chunks[0]);
-
-    let next_btn = Paragraph::new("Next Day")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Cyan));
+    render_button(frame, "Previous Day", chunks[0], Color::Cyan);
     app.next_day_btn = chunks[1];
-    frame.render_widget(next_btn, chunks[1]);
-
-    let date_display = Paragraph::new(format!("Date {}", app.current_mistake_date))
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
+    render_button(frame, "Next Day", chunks[1], Color::Cyan);
+    let date_display = Paragraph::new(format!("Date {}", app.current_mistake_date)).block(Block::default().borders(Borders::ALL)).alignment(Alignment::Center).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
     app.date_btn = chunks[2];
     frame.render_widget(date_display, chunks[2]);
-
-    let today_btn = Paragraph::new("Jump to Today")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Green));
     app.today_btn = chunks[3];
-    frame.render_widget(today_btn, chunks[3]);
+    render_button(frame, "Jump to Today", chunks[3], Color::Green);
 }
 
 fn draw_date_navigation(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    // Check if we're in Finance view to show Summary button
     let is_finance = matches!(app.view_mode, ViewMode::Finance);
-    
-    let chunks = if is_finance {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(16),
-                Constraint::Percentage(16),
-                Constraint::Percentage(32),
-                Constraint::Percentage(18),
-                Constraint::Percentage(18),
-            ])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(40),
-                Constraint::Percentage(20),
-            ])
-            .split(area)
-    };
-
-    let prev_btn = Paragraph::new("Previous Day")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Cyan));
+    let chunks = if is_finance { Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(16), Constraint::Percentage(16), Constraint::Percentage(32), Constraint::Percentage(18), Constraint::Percentage(18)]).split(area) } else { Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(20), Constraint::Percentage(20), Constraint::Percentage(40), Constraint::Percentage(20)]).split(area) };
     app.prev_day_btn = chunks[0];
-    frame.render_widget(prev_btn, chunks[0]);
-
-    let next_btn = Paragraph::new("Next Day")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Cyan));
+    render_button(frame, "Previous Day", chunks[0], Color::Cyan);
     app.next_day_btn = chunks[1];
-    frame.render_widget(next_btn, chunks[1]);
-
-    let date_display = Paragraph::new(format!("Date {}", app.current_journal_date))
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
+    render_button(frame, "Next Day", chunks[1], Color::Cyan);
+    render_styled_button(frame, &format!("Date {}", app.current_journal_date), chunks[2], Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
     app.date_btn = chunks[2];
-    frame.render_widget(date_display, chunks[2]);
-
-    let today_btn = Paragraph::new("Jump to Today")
-        .block(Block::default().borders(Borders::ALL))
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Green));
     app.today_btn = chunks[3];
-    frame.render_widget(today_btn, chunks[3]);
-    
-    // Add Summary button for Finance view
+    render_button(frame, "Jump to Today", chunks[3], Color::Green);
     if is_finance {
-        let summary_text = if app.show_finance_summary {
-            "Hide Summary"
-        } else {
-            "Show Summary"
-        };
-        let summary_btn = Paragraph::new(summary_text)
-            .block(Block::default().borders(Borders::ALL))
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::Magenta));
         app.summary_btn = chunks[4];
-        frame.render_widget(summary_btn, chunks[4]);
+        render_button(frame, if app.show_finance_summary { "Hide Summary" } else { "Show Summary" }, chunks[4], Color::Magenta);
     }
 }
 
 fn draw_journal_entry(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let entry = app
-        .journal_entries
-        .iter()
-        .find(|e| e.date == app.current_journal_date)
-        .cloned();
-
+    let entry = app.journal_entries.iter().find(|e| e.date == app.current_journal_date).cloned();
+    let title = format!("Notebook Journal - {}", app.current_journal_date);
+    app.content_edit_area = area;
     if app.is_editing() && matches!(app.edit_target, EditTarget::JournalEntry) {
-        let title = format!("Journal Entry - {} (Ctrl+S to save, Esc to cancel)", app.current_journal_date);
-        app.content_edit_area = area;
-        render_textarea_editor(frame, app, area, &title);
+        render_textarea_editor(frame, app, area, &format!("Journal Entry - {} (Ctrl+S to save, Esc to cancel)", app.current_journal_date));
     } else if entry.is_none() {
-        // Show help when no entry exists
-        let help_text = vec![
-            Line::from(""),
-            Line::from("Notebook JOURNAL - DAILY REFLECTIONS"),
-            Line::from(""),
-            Line::from("Features:"),
-            Line::from("  - Write one entry per day"),
-            Line::from("  - Track your mood (optional)"),
-            Line::from("  - Navigate between dates"),
-            Line::from("  - Search entries by date"),
-            Line::from(""),
-            Line::from("How to use:"),
-            Line::from("  1. Click the journal area to start writing"),
-            Line::from("  2. Type freely - your entry auto-saves"),
-            Line::from("  3. Use Prev/Next to navigate days"),
-            Line::from("  4. Click 'Today' to jump to current date"),
-            Line::from(""),
-            Line::from("Optional: Start with mood line:"),
-            Line::from("  Mood: happy/sad/reflective/motivated/etc"),
-            Line::from(""),
-            Line::from("Tips Tips:"),
-            Line::from("  - Write regularly for best results"),
-            Line::from("  - No pressure to write long entries"),
-            Line::from("  - Past entries are always there to review"),
-        ];
-
-        let journal_panel = Paragraph::new(help_text)
-            .block(
-                Block::default()
-                    .title(format!("Notebook Journal - {}", app.current_journal_date))
-                    .borders(Borders::ALL),
-            )
-            .style(Style::default().fg(Color::Gray));
-        app.content_edit_area = area;
-        frame.render_widget(journal_panel, area);
+        let help = "\nNotebook JOURNAL - DAILY REFLECTIONS\n\nFeatures:\n  - Write one entry per day\n  - Track your mood (optional)\n  - Navigate between dates\n  - Search entries by date\n\nHow to use:\n  1. Click the journal area to start writing\n  2. Type freely - your entry auto-saves\n  3. Use Prev/Next to navigate days\n  4. Click 'Today' to jump to current date\n\nOptional: Start with mood line:\n  Mood: happy/sad/reflective/motivated/etc\n\nTips Tips:\n  - Write regularly for best results\n  - No pressure to write long entries\n  - Past entries are always there to review";
+        frame.render_widget(Paragraph::new(help).block(Block::default().title(title).borders(Borders::ALL)).style(Style::default().fg(Color::Gray)), area);
     } else {
         let content = entry
             .as_ref()
             .map(|e| {
-                let mood_line = e
-                    .mood
-                    .as_ref()
-                    .map(|m| format!("Mood: {}\n\n", m))
-                    .unwrap_or_default();
-                format!("{}{}", mood_line, e.content)
+                let mood = e.mood.as_ref().map(|m| format!("Mood: {}\n\n", m)).unwrap_or_default();
+                format!("{}{}", mood, e.content)
             })
             .unwrap_or_else(|| "(Click to write in your journal)".to_string());
-
-        let journal_panel = Paragraph::new(content)
-            .block(
-                Block::default()
-                    .title(format!("Notebook Journal - {}", app.current_journal_date))
-                    .borders(Borders::ALL),
-            )
-            .wrap(Wrap { trim: false });
-        app.content_edit_area = area;
-        frame.render_widget(journal_panel, area);
+        frame.render_widget(Paragraph::new(content).block(Block::default().title(title).borders(Borders::ALL)).wrap(Wrap { trim: false }), area);
     }
 }
