@@ -960,7 +960,7 @@ impl App {
         }
 
         // 3) Bundled fallback (basic list)
-        const EN_WORDS: &str = include_str!("assets/spell_en_basic.txt");
+        const EN_WORDS: &str = include_str!("../assets/spell_en_basic.txt");
         Some(SimpleDictionary::from_wordlist(EN_WORDS))
     }
 

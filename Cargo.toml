@@ -1,11 +1,11 @@
 [package]
-name = "mynotes"
+name = "trackpersonalinsights"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "mynotes"
-path = "main.rs"
+name = "TrackPersonalInsights"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

@@ -600,24 +600,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mynotes"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bincode",
- "chrono",
- "crossterm 0.27.0",
- "csv",
- "dirs",
- "open",
- "ratatui 0.26.3",
- "serde",
- "serde_json",
- "strsim",
- "tui-textarea",
-]
-
-[[package]]
 name = "num-conv"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1101,6 +1083,24 @@ name = "time-core"
 version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7694e1cfe791f8d31026952abf09c69ca6f6fa4e1a1229e18988f06a04a12dca"
+
+[[package]]
+name = "trackpersonalinsights"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "chrono",
+ "crossterm 0.27.0",
+ "csv",
+ "dirs",
+ "open",
+ "ratatui 0.26.3",
+ "serde",
+ "serde_json",
+ "strsim",
+ "tui-textarea",
+]
 
 [[package]]
 name = "tui-textarea"

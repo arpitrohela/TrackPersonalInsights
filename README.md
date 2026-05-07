@@ -12,6 +12,37 @@ Press ? for help in the application.
 
 ---
 
+## Install & Run
+
+### Option 1: Build from source
+
+```bash
+cargo build --release
+./target/release/TrackPersonalInsights
+```
+
+### Option 2: Install as a CLI tool
+
+From a local clone:
+
+```bash
+cargo install --path . --bin TrackPersonalInsights
+```
+
+From a Git repository:
+
+```bash
+cargo install --git <repo-url> --bin TrackPersonalInsights
+```
+
+Then run:
+
+```bash
+TrackPersonalInsights
+```
+
+---
+
 ## TODO
 
 - Add a Finance sub-tab (like Mistake Book under Journal) to import bank/wallet CSVs, render them in a table view, and support multiple sources as separate tabs. Provide an AI-powered merge flow to normalize different bank formats into a single unified view, so the Finance tab is usable without manual entry.
