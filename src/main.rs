@@ -6,6 +6,9 @@ use std::{collections::{BTreeSet, HashSet}, env, fs, io, path::PathBuf, rc::Rc, 
 use strsim::jaro_winkler;
 use tui_textarea::{CursorMove, Input, Key, TextArea};
 
+mod markdown_renderer;
+mod code_highlighter;
+
 const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024;
 
 fn today() -> NaiveDate { Local::now().date_naive() }
@@ -752,6 +755,9 @@ struct App {
     spell_check_selected: usize,
     spell_check_scroll: u16,
     custom_words: HashSet<String>,
+    // Editor: live markdown rendering + code syntax highlighting
+    markdown_renderer: markdown_renderer::MarkdownRenderer,
+    code_highlighter: code_highlighter::CodeHighlighter,
 }
 
 fn default_notebook() -> Notebook {
@@ -941,6 +947,9 @@ impl App {
             mistake_list_btn: rect,
             mistake_log_btn: rect,
             search_btn: rect,
+            // Editor: live markdown rendering + code syntax highlighting
+            markdown_renderer: markdown_renderer::MarkdownRenderer::new(),
+            code_highlighter: code_highlighter::CodeHighlighter::new(),
         }
     }
 
@@ -2341,8 +2350,9 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         app.editing_cursor_line = row;
         app.editing_cursor_col = col;
 
-        // Update textarea scroll position to keep cursor visible
-        let visible_height: usize = 10; // approximate typical editing area height
+        // Update textarea scroll position to keep cursor visible. Use the real
+        // editor height (minus borders) captured during the last draw.
+        let visible_height: usize = (app.content_edit_area.height.saturating_sub(2) as usize).max(1);
         if row >= (app.textarea_scroll as usize).saturating_add(visible_height) {
             app.textarea_scroll = row.saturating_sub(visible_height.saturating_sub(1)) as u16;
         } else if row < app.textarea_scroll as usize {
@@ -2536,12 +2546,14 @@ fn handle_notes_mouse_left(app: &mut App, mouse: MouseEvent) {
             }
         }
         if matches!(app.edit_target, EditTarget::PageContent) {
-            app.textarea.move_cursor(CursorMove::Jump(rel_y, rel_x));
+            let target_row = rel_y.saturating_add(app.textarea_scroll);
+            app.textarea.move_cursor(CursorMove::Jump(target_row, rel_x));
         } else if matches!(app.hierarchy_level, HierarchyLevel::Page) {
             let content = app.current_page().map(|p| p.content.clone()).unwrap_or_default();
             start_editing(app, EditTarget::PageContent, content);
             app.inline_edit_mode = false;
-            app.textarea.move_cursor(CursorMove::Jump(rel_y, rel_x));
+            let target_row = rel_y.saturating_add(app.textarea_scroll);
+            app.textarea.move_cursor(CursorMove::Jump(target_row, rel_x));
         } else {
             return;
         }
@@ -2555,7 +2567,8 @@ fn handle_textarea_mouse_click(app: &mut App, mouse: MouseEvent) {
     if inside_rect(mouse, app.content_edit_area) && app.is_editing() {
         let rel_y = mouse.row.saturating_sub(app.content_edit_area.y + 1);
         let rel_x = mouse.column.saturating_sub(app.content_edit_area.x + 1);
-        app.textarea.move_cursor(CursorMove::Jump(rel_y, rel_x));
+        let target_row = rel_y.saturating_add(app.textarea_scroll);
+        app.textarea.move_cursor(CursorMove::Jump(target_row, rel_x));
         let (row, col) = app.textarea.cursor();
         app.editing_cursor_line = row;
         app.editing_cursor_col = col;
@@ -2981,51 +2994,6 @@ fn parse_and_render_table(table_text: &str) -> Option<Vec<Line<'static>>> {
 }
 
 // Diagram rendering removed (feature disabled)
-
-// Parse and render simple flowchart: Line starting with `>` or bullet points
-fn parse_and_render_flowchart(flowchart_text: &str) -> Option<Vec<Line<'static>>> {
-    let lines: Vec<&str> = flowchart_text.lines().collect();
-    if lines.is_empty() {
-        return None;
-    }
-
-    let mut result = Vec::new();
-    let mut is_flowchart = false;
-
-    for (idx, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
-
-        // Detect flowchart markers: lines starting with >, -, or numbers
-        if trimmed.starts_with('>') || trimmed.starts_with("- ") || trimmed.starts_with("1. ") {
-            is_flowchart = true;
-
-            let (marker, content) = if trimmed.starts_with('>') {
-                (trimmed.chars().next().unwrap().to_string(), trimmed[1..].trim())
-            } else if trimmed.starts_with("- ") {
-                ("-".to_string(), trimmed[2..].trim())
-            } else {
-                let dot_pos = trimmed.find('.').unwrap_or(0);
-                (trimmed[..=dot_pos].to_string(), trimmed[dot_pos + 1..].trim())
-            };
-
-            let indent = line.len() - trimmed.len();
-            let indent_str = " ".repeat(indent);
-
-            result.push(Line::from(vec![Span::raw(indent_str), Span::styled(format!("{} ", marker), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)), Span::styled(content.to_string(), Style::default().fg(Color::White))]));
-
-            // Add connector if not last
-            if idx < lines.len() - 1 {
-                result.push(Line::from(vec![Span::raw(format!("{}  ", " ".repeat(indent))), Span::styled("↓", Style::default().fg(Color::Cyan))]));
-            }
-        }
-    }
-
-    if is_flowchart && !result.is_empty() {
-        Some(result)
-    } else {
-        None
-    }
-}
 
 fn looks_like_path(path: &str) -> bool {
     let trimmed = path.trim_matches(|c: char| c == '"');
@@ -3515,84 +3483,48 @@ fn render_formatted_content(frame: &mut ratatui::Frame, app: &mut App, area: Rec
         }
     };
 
-    // Parse and render with highlighting
+    // Render markdown live. Tables are extracted and rendered with the
+    // dedicated table renderer; everything else is buffered and rendered
+    // through the markdown renderer (headings, bold/italic, lists, blockquotes,
+    // and syntax-highlighted code blocks).
     let mut lines = Vec::new();
-    let mut _y_offset = area.y + 1;
-    let mut in_code_block = false;
-    let mut code_lang = String::new();
-
     let content_lines: Vec<&str> = content.lines().collect();
+    let mut buf = String::new();
     let mut i = 0;
 
     while i < content_lines.len() {
         let line = content_lines[i];
 
-        // Check for table start
-        if line.trim().starts_with('|') && !in_code_block {
+        // Table: a run of lines starting with '|'.
+        if line.trim().starts_with('|') {
             let table_start = i;
             let mut table_end = i + 1;
-
-            // Find end of table
-            while table_end < content_lines.len() && content_lines[table_end].trim().starts_with('|') {
+            while table_end < content_lines.len()
+                && content_lines[table_end].trim().starts_with('|')
+            {
                 table_end += 1;
             }
-
-            // Extract and render table
             let table_text = content_lines[table_start..table_end].join("\n");
             if let Some(table_lines) = parse_and_render_table(&table_text) {
-                let table_len = table_lines.len() as u16;
+                if !buf.is_empty() {
+                    let rendered = app.markdown_renderer.render(&buf, &app.code_highlighter);
+                    lines.extend(rendered);
+                    buf.clear();
+                }
                 lines.extend(table_lines);
                 i = table_end;
-                _y_offset += table_len;
                 continue;
             }
         }
 
-        // Check for flowchart markers - only if starting with > or numbered lists (not plain -)
-        if (line.trim().starts_with('>') || line.trim().starts_with("1. ")) && !in_code_block {
-            let flowchart_start = i;
-            let mut flowchart_end = i + 1;
-
-            // Find consecutive flowchart lines (>, -, or numbered)
-            while flowchart_end < content_lines.len() {
-                let next_line = content_lines[flowchart_end].trim();
-                if next_line.is_empty() || (!next_line.starts_with('>') && !next_line.starts_with("- ") && !next_line.starts_with("1. ") && !next_line.starts_with("2. ")) {
-                    break;
-                }
-                flowchart_end += 1;
-            }
-
-            // Extract and render flowchart
-            let flowchart_text = content_lines[flowchart_start..flowchart_end].join("\n");
-            if let Some(flowchart_lines) = parse_and_render_flowchart(&flowchart_text) {
-                let flowchart_len = flowchart_lines.len() as u16;
-                lines.extend(flowchart_lines);
-                i = flowchart_end;
-                _y_offset += flowchart_len;
-                continue;
-            }
-        }
-
-        // Regular line processing
-        if line.starts_with("```") {
-            in_code_block = !in_code_block;
-            if in_code_block {
-                code_lang = line.trim_start_matches("```").to_string();
-                lines.push(Line::from(Span::styled(line, Style::default().fg(Color::DarkGray))));
-            } else {
-                code_lang.clear();
-                lines.push(Line::from(Span::styled(line, Style::default().fg(Color::DarkGray))));
-            }
-        } else if in_code_block {
-            // Syntax highlighted code
-            lines.push(Line::from(Span::styled(line, Style::default().fg(Color::Green))));
-        } else {
-            // Regular text (links not rendered as clickable)
-            lines.push(Line::from(line.to_string()));
-        }
-
+        buf.push_str(line);
+        buf.push('\n');
         i += 1;
-        _y_offset += 1;
+    }
+
+    if !buf.is_empty() {
+        let rendered = app.markdown_renderer.render(&buf, &app.code_highlighter);
+        lines.extend(rendered);
     }
 
     let title = match app.hierarchy_level {
@@ -3819,17 +3751,16 @@ fn textarea_lines_with_cursor(app: &App, height: u16) -> Vec<Line<'static>> {
             lines.push(Line::from(line.clone()));
         }
     }
-    let view_height = height.max(1) as usize;
-    if lines.len() > view_height {
-        let start = cursor_row.saturating_sub(view_height.saturating_sub(1));
-        let end = (start + view_height).min(lines.len());
-        lines[start..end].to_vec()
-    } else {
-        lines
-    }
+    // Return every line; the Paragraph's `textarea_scroll` (kept in sync with
+    // the cursor) is the single source of vertical scrolling. Slicing here too
+    // double-scrolled the view and could push content (e.g. tables) off-screen.
+    let _ = height;
+    lines
 }
 
 fn render_textarea_editor(frame: &mut ratatui::Frame, app: &mut App, area: Rect, title: &str) {
+    // Single-pane editor for all modes. Page content is shown as raw markdown
+    // with the cursor while editing, then rendered live in view mode on save.
     let inner_height = area.height.saturating_sub(2) as usize; // account for borders
     let lines_display = textarea_lines_with_cursor(app, inner_height as u16);
 
