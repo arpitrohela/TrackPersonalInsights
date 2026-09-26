@@ -1,5 +1,25 @@
 # TrackPersonalInsights
 
+![Screenshot 1](Screenshots/Screenshot%20from%202025-12-27%2019-10-50.png)
+
+![Screenshot 2](Screenshots/Screenshot%20from%202025-12-27%2019-10-58.png)
+
+![Screenshot 3](Screenshots/Screenshot%20from%202025-12-27%2019-11-06.png)
+
+![Screenshot 4](Screenshots/Screenshot%20from%202025-12-27%2019-11-15.png)
+
+![Screenshot 5](Screenshots/Screenshot%20from%202025-12-27%2019-11-22.png)
+
+![Screenshot 6](Screenshots/Screenshot%20from%202025-12-27%2019-11-29.png)
+
+![Screenshot 7](Screenshots/Screenshot%20from%202025-12-27%2019-11-36.png)
+
+![Screenshot 8](Screenshots/Screenshot%20from%202025-12-27%2019-11-46.png)
+
+![Screenshot 9](Screenshots/Screenshot%20from%202025-12-27%2019-11-56.png)
+
+![Screenshot 10](Screenshots/Screenshot%20from%202025-12-27%2019-12-07.png)
+
 **Your all-in-one terminal productivity powerhouse**: unified notes, daily planner, journal, habit tracker, finances, calorie counter, kanban board, and flashcard builder designed for speed and clarity.
 
 A feature-rich, terminal-based productivity app combining hierarchical note taking, finance summaries with monthly/yearly totals, category filtering, and flashcard workflows all in aTUI(Terminal User Interface).
@@ -221,27 +241,3 @@ Tasks use the Eisenhower matrix instead of priority. Values:
 Planner includes an Eisenhower Matrix view with a Schedule Focus panel to quickly assign tasks and see planned items at a glance. Schedule Focus only lists Schedule-quadrant items that have a due date, soonest first — it will not show every Schedule item, only the ones that are actually "Today" or "Planned".
 
 Kanban has its own, separate Eisenhower Matrix view for triaging individual cards; it is intentionally independent from the Planner matrix (Planner is for planning life/events, Kanban is for moving individual tasks through workflow stages).
-
----
-
-## Screenshots
-
-![Screenshot 1](Screenshots/Screenshot%20from%202025-12-27%2019-10-50.png)
-
-![Screenshot 2](Screenshots/Screenshot%20from%202025-12-27%2019-10-58.png)
-
-![Screenshot 3](Screenshots/Screenshot%20from%202025-12-27%2019-11-06.png)
-
-![Screenshot 4](Screenshots/Screenshot%20from%202025-12-27%2019-11-15.png)
-
-![Screenshot 5](Screenshots/Screenshot%20from%202025-12-27%2019-11-22.png)
-
-![Screenshot 6](Screenshots/Screenshot%20from%202025-12-27%2019-11-29.png)
-
-![Screenshot 7](Screenshots/Screenshot%20from%202025-12-27%2019-11-36.png)
-
-![Screenshot 8](Screenshots/Screenshot%20from%202025-12-27%2019-11-46.png)
-
-![Screenshot 9](Screenshots/Screenshot%20from%202025-12-27%2019-11-56.png)
-
-![Screenshot 10](Screenshots/Screenshot%20from%202025-12-27%2019-12-07.png)
