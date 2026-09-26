@@ -307,6 +307,10 @@ enum TaskMatrix {
     Schedule,
     Do,
     Eliminate,
+    // Appended last so bincode's ordinal encoding stays compatible with existing
+    // saved data. This is the real starting state for a brand-new task/card,
+    // before the user has actually triaged it into one of the 4 quadrants.
+    Unassigned,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -370,12 +374,12 @@ struct KanbanCard {
 
 impl KanbanCard {
     fn new(title: String, note: String) -> Self {
-        Self { title, note, stage: KanbanStage::Todo, matrix: TaskMatrix::Schedule, due_date: None, created_at: today() }
+        Self { title, note, stage: KanbanStage::Todo, matrix: TaskMatrix::Unassigned, due_date: None, created_at: today() }
     }
 }
 
 fn default_kanban_matrix() -> TaskMatrix {
-    TaskMatrix::Schedule
+    TaskMatrix::Unassigned
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -523,7 +527,7 @@ impl Card {
 
 impl Task {
     fn new(title: String, description: String) -> Self {
-        Self { title, description, completed: false, matrix: TaskMatrix::Schedule, due_date: None, reminder_text: None, reminder_date: None, reminder_time: None, recurrence: Recurrence::None, created_at: today() }
+        Self { title, description, completed: false, matrix: TaskMatrix::Unassigned, due_date: None, reminder_text: None, reminder_date: None, reminder_time: None, recurrence: Recurrence::None, created_at: today() }
     }
 }
 
@@ -3873,6 +3877,7 @@ fn task_matrix_label(matrix: TaskMatrix) -> &'static str {
         TaskMatrix::Schedule => "Schedule",
         TaskMatrix::Delegate => "Delegate",
         TaskMatrix::Eliminate => "Eliminate",
+        TaskMatrix::Unassigned => "Unassigned",
     }
 }
 
@@ -3886,6 +3891,7 @@ fn parse_task_matrix(text: &str) -> Option<TaskMatrix> {
         "delegate" | "urgent not important" | "not important urgent" | "uni" => Some(TaskMatrix::Delegate),
         "low" => Some(TaskMatrix::Delegate),
         "eliminate" | "delete" | "drop" | "not urgent not important" | "not important not urgent" | "nuni" | "ninu" => Some(TaskMatrix::Eliminate),
+        "unassigned" | "none" | "not set" | "unsorted" | "inbox" => Some(TaskMatrix::Unassigned),
         _ => None,
     }
 }
@@ -3941,7 +3947,7 @@ fn format_task_editor_content(task: &Task) -> String {
 
 fn new_task_editor_template() -> String {
     let today = Local::now().date_naive();
-    format!("Title: \nStatus: Pending (options: Pending|Completed)\nMatrix: Schedule (options: Do|Schedule|Delegate|Eliminate)\nCreated: {}\nDue: Not set\nReminder: None (e.g. 2025-12-25 09:30)\nRepeat: none (options: none|daily|weekly|monthly|range YYYY-MM-DD to YYYY-MM-DD at HH:MM)\n\nDescription:\n", today)
+    format!("Title: \nStatus: Pending (options: Pending|Completed)\nMatrix: Unassigned (options: Do|Schedule|Delegate|Eliminate|Unassigned)\nCreated: {}\nDue: Not set\nReminder: None (e.g. 2025-12-25 09:30)\nRepeat: none (options: none|daily|weekly|monthly|range YYYY-MM-DD to YYYY-MM-DD at HH:MM)\n\nDescription:\n", today)
 }
 
 fn parse_task_editor_content(input: &str, existing: Option<&Task>, created_fallback: NaiveDate) -> Task {
@@ -4076,7 +4082,7 @@ fn validate_task_status(text: &str) -> Result<bool, String> {
 }
 
 fn validate_task_matrix(text: &str) -> Result<TaskMatrix, String> {
-    parse_task_matrix(text).ok_or_else(|| "Invalid Matrix. Valid options: Do|Schedule|Delegate|Eliminate".to_string())
+    parse_task_matrix(text).ok_or_else(|| "Invalid Matrix. Valid options: Do|Schedule|Delegate|Eliminate|Unassigned".to_string())
 }
 
 fn validate_task_recurrence(text: &str) -> Result<Recurrence, String> {
@@ -4383,9 +4389,9 @@ fn parse_and_validate_task(input: &str, existing: Option<&Task>) -> Result<Task,
     let matrix = if let Some(val) = matrix_value {
         validate_task_matrix(&val)?
     } else if existing.is_none() {
-        TaskMatrix::Schedule
+        TaskMatrix::Unassigned
     } else {
-        existing.map(|t| t.matrix).unwrap_or(TaskMatrix::Schedule)
+        existing.map(|t| t.matrix).unwrap_or(TaskMatrix::Unassigned)
     };
 
     // Validate Recurrence
@@ -4632,7 +4638,7 @@ fn parse_calorie_editor_content(input: &str, existing: Option<&CalorieEntry>, de
 }
 
 fn new_kanban_editor_template() -> String {
-    "Title: \nMatrix: Schedule (options: Do|Schedule|Delegate|Eliminate)\nDue: Not set\nNote:\n".to_string()
+    "Title: \nMatrix: Unassigned (options: Do|Schedule|Delegate|Eliminate|Unassigned)\nDue: Not set\nNote:\n".to_string()
 }
 
 fn format_kanban_editor_content(card: &KanbanCard) -> String {
@@ -4720,7 +4726,7 @@ fn parse_kanban_editor_content(input: &str, existing: Option<&KanbanCard>) -> Op
     if let Some(m) = matrix {
         card.matrix = m;
     } else if existing.is_none() {
-        card.matrix = TaskMatrix::Schedule;
+        card.matrix = TaskMatrix::Unassigned;
     }
 
     if existing.is_none() {
@@ -4917,22 +4923,30 @@ fn draw_matrix_panel(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     draw_matrix_assign_buttons(frame, app, chunks[2]);
 }
 
+// Items in the Schedule quadrant that actually have a due date, soonest first.
+// Items with no due date aren't "Today" or "Planned" so they don't belong here -
+// they're just unscheduled Schedule-quadrant items, visible in List/Board view.
+fn schedule_focus_order(items: impl Iterator<Item = (usize, TaskMatrix, Option<NaiveDate>)>) -> Vec<(usize, NaiveDate)> {
+    let mut dated: Vec<(usize, NaiveDate)> = items.filter(|(_, m, due)| matches!(m, TaskMatrix::Schedule) && due.is_some()).map(|(idx, _, due)| (idx, due.unwrap())).collect();
+    dated.sort_by_key(|(_, due)| *due);
+    dated
+}
+
 fn draw_schedule_focus_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     app.matrix_items.clear();
     let today = Local::now().date_naive();
-    let focus_items = app
-        .tasks
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| matches!(t.matrix, TaskMatrix::Schedule))
-        .map(|(idx, task)| {
-            let due = task.due_date.map(|d| d.to_string()).unwrap_or_else(|| "No date".to_string());
-            let today_flag = if task.due_date == Some(today) { " • Today" } else { "" };
+    let unassigned = app.tasks.iter().filter(|t| matches!(t.matrix, TaskMatrix::Unassigned)).count();
+    let focus_items = schedule_focus_order(app.tasks.iter().enumerate().map(|(idx, t)| (idx, t.matrix, t.due_date)))
+        .into_iter()
+        .map(|(idx, due)| {
+            let task = &app.tasks[idx];
+            let today_flag = if due == today { " • Today" } else { "" };
             (idx, format!("{} ({}){}", task.title, due, today_flag), task.completed)
         })
         .collect::<Vec<_>>();
+    let title = if unassigned > 0 { format!("Schedule Focus (Today + Planned) — {} unassigned in List view", unassigned) } else { "Schedule Focus (Today + Planned)".to_string() };
     let items = build_list_items(focus_items, app.current_task_idx, area, &mut app.matrix_items);
-    frame.render_widget(List::new(items).block(Block::default().title("Schedule Focus (Today + Planned)").borders(Borders::ALL)).style(Style::default().fg(Color::White)), area);
+    frame.render_widget(List::new(items).block(Block::default().title(title).borders(Borders::ALL)).style(Style::default().fg(Color::White)), area);
 }
 
 fn draw_matrix_grid(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
@@ -4990,6 +5004,7 @@ fn draw_task_list(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
                     TaskMatrix::Schedule => "(Sched)",
                     TaskMatrix::Delegate => "(Del)",
                     TaskMatrix::Eliminate => "(Elim)",
+                    TaskMatrix::Unassigned => "(Unsorted)",
                 };
                 let title_first = task.title.lines().next().unwrap_or(&task.title);
                 let due_str = task.due_date.map(|d| format!(" ({})", d)).unwrap_or_default();
@@ -5352,19 +5367,18 @@ fn draw_kanban_matrix_view(frame: &mut ratatui::Frame, app: &mut App, area: Rect
 fn draw_kanban_schedule_focus(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     app.kanban_matrix_items.clear();
     let today = Local::now().date_naive();
-    let focus_items = app
-        .kanban_cards
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| matches!(c.matrix, TaskMatrix::Schedule))
-        .map(|(idx, card)| {
-            let due = card.due_date.map(|d| d.to_string()).unwrap_or_else(|| "No date".to_string());
-            let today_flag = if card.due_date == Some(today) { " • Today" } else { "" };
+    let unassigned = app.kanban_cards.iter().filter(|c| matches!(c.matrix, TaskMatrix::Unassigned)).count();
+    let focus_items = schedule_focus_order(app.kanban_cards.iter().enumerate().map(|(idx, c)| (idx, c.matrix, c.due_date)))
+        .into_iter()
+        .map(|(idx, due)| {
+            let card = &app.kanban_cards[idx];
+            let today_flag = if due == today { " • Today" } else { "" };
             (idx, format!("{} ({}){}", card.title, due, today_flag), false)
         })
         .collect::<Vec<_>>();
+    let title = if unassigned > 0 { format!("Schedule Focus (Today + Planned) — {} unassigned in Board view", unassigned) } else { "Schedule Focus (Today + Planned)".to_string() };
     let items = build_list_items(focus_items, app.current_kanban_card_idx, area, &mut app.kanban_matrix_items);
-    frame.render_widget(List::new(items).block(Block::default().title("Schedule Focus (Today + Planned)").borders(Borders::ALL)).style(Style::default().fg(Color::White)), area);
+    frame.render_widget(List::new(items).block(Block::default().title(title).borders(Borders::ALL)).style(Style::default().fg(Color::White)), area);
 }
 
 fn draw_kanban_matrix_grid(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
@@ -6188,5 +6202,47 @@ mod tests {
                 "words added to the custom spell-check dictionary must persist across restarts"
             );
         });
+    }
+
+    #[test]
+    fn new_task_starts_unassigned_not_prechosen_as_schedule() {
+        let task = Task::new("Write report".to_string(), String::new());
+        assert!(
+            matches!(task.matrix, TaskMatrix::Unassigned),
+            "a brand-new task must not be silently pre-classified into a quadrant the user never chose"
+        );
+    }
+
+    #[test]
+    fn new_kanban_card_starts_unassigned_not_prechosen_as_schedule() {
+        let card = KanbanCard::new("Sketch backlog".to_string(), String::new());
+        assert!(
+            matches!(card.matrix, TaskMatrix::Unassigned),
+            "a brand-new kanban card must not be silently pre-classified into a quadrant the user never chose"
+        );
+    }
+
+    #[test]
+    fn creating_a_task_via_the_editor_template_without_editing_it_leaves_it_unassigned() {
+        // Regression for: the "New Task" template used to hardcode "Matrix: Schedule",
+        // so every task created via that flow silently landed in Schedule even though
+        // the user never touched the Matrix line.
+        let template = new_task_editor_template();
+        let created = parse_and_validate_task(&template, None).expect("template should validate as-is");
+        assert!(matches!(created.matrix, TaskMatrix::Unassigned));
+    }
+
+    #[test]
+    fn schedule_focus_only_includes_dated_schedule_items_sorted_soonest_first() {
+        let today = today();
+        let items = vec![
+            (0usize, TaskMatrix::Schedule, None),                                  // no due date: excluded
+            (1, TaskMatrix::Do, Some(today)),                                      // wrong quadrant: excluded
+            (2, TaskMatrix::Schedule, Some(today + chrono::Duration::days(5))),
+            (3, TaskMatrix::Schedule, Some(today)),
+            (4, TaskMatrix::Unassigned, Some(today)),                              // wrong quadrant: excluded
+        ];
+        let result = schedule_focus_order(items.into_iter());
+        assert_eq!(result, vec![(3, today), (2, today + chrono::Duration::days(5))]);
     }
 }

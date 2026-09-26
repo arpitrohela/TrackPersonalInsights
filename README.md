@@ -216,8 +216,11 @@ Tasks use the Eisenhower matrix instead of priority. Values:
 *   `Schedule`: Important + Not Urgent
 *   `Delegate`: Urgent + Not Important
 *   `Eliminate`: Not Urgent + Not Important
+*   `Unassigned`: the starting state for every new task/card until you triage it into one of the 4 quadrants above (via keys `1`-`4` or the Assign buttons)
 
-Planner includes an Eisenhower Matrix view with a Schedule Focus panel to quickly assign tasks and see planned items at a glance.
+Planner includes an Eisenhower Matrix view with a Schedule Focus panel to quickly assign tasks and see planned items at a glance. Schedule Focus only lists Schedule-quadrant items that have a due date, soonest first — it will not show every Schedule item, only the ones that are actually "Today" or "Planned".
+
+Kanban has its own, separate Eisenhower Matrix view for triaging individual cards; it is intentionally independent from the Planner matrix (Planner is for planning life/events, Kanban is for moving individual tasks through workflow stages).
 
 ---
 
