@@ -61,6 +61,21 @@ Then run:
 TrackPersonalInsights
 ```
 
+### Option 3: Install as a desktop app (Linux)
+
+Adds a clickable launcher with an icon to your app menu/launcher (GNOME, KDE, Omarchy/Hyprland launchers like walker/fuzzel/wofi, etc.) - no need to open a terminal manually:
+
+```bash
+cargo build --release
+./scripts/install-linux.sh
+```
+
+Search for "TrackPersonalInsights" in your launcher. To remove it: `./scripts/uninstall-linux.sh`.
+
+### Prebuilt binaries
+
+See [Releases](https://github.com/arpitrohela/TrackPersonalInsights/releases) or the [`releases/`](releases/) folder for prebuilt Linux, Windows, and macOS binaries.
+
 ---
 
 ## TODO
