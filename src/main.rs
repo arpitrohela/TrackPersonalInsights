@@ -14,6 +14,9 @@ const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024;
 fn today() -> NaiveDate { Local::now().date_naive() }
 
 fn get_data_dir() -> Result<PathBuf> {
+    if let Ok(dir) = env::var("MYNOTES_DATA_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
     if let Some(data_home) = dirs::data_dir() {
         Ok(data_home.join("mynotes"))
     } else {
@@ -87,6 +90,8 @@ struct AppData {
     planner_view: PlannerView,
     #[serde(default)]
     kanban_view: KanbanView,
+    #[serde(default)]
+    custom_words: HashSet<String>,
 }
 
 impl AppData {
@@ -116,12 +121,13 @@ impl AppData {
             journal_view: a.journal_view,
             planner_view: a.planner_view,
             kanban_view: a.kanban_view,
+            custom_words: a.custom_words.clone(),
         }
     }
 
     fn into_app(self) -> App {
         let mut a = App::new();
-        let Self { notebooks, tasks, journal_entries, mistake_entries, habits, finances, calories, kanban_cards, cards, current_notebook_idx, current_section_idx, current_page_idx, current_task_idx, current_habit_idx, current_finance_idx, current_calorie_idx, current_kanban_card_idx, current_card_idx, current_journal_date, current_mistake_date, view_mode, journal_view, planner_view, kanban_view } = self;
+        let Self { notebooks, tasks, journal_entries, mistake_entries, habits, finances, calories, kanban_cards, cards, current_notebook_idx, current_section_idx, current_page_idx, current_task_idx, current_habit_idx, current_finance_idx, current_calorie_idx, current_kanban_card_idx, current_card_idx, current_journal_date, current_mistake_date, view_mode, journal_view, planner_view, kanban_view, custom_words } = self;
         a.notebooks = notebooks;
         a.tasks = tasks;
         a.journal_entries = journal_entries;
@@ -146,6 +152,7 @@ impl AppData {
         a.journal_view = journal_view;
         a.planner_view = planner_view;
         a.kanban_view = kanban_view;
+        a.custom_words = custom_words;
         a
     }
 }
@@ -527,6 +534,23 @@ impl JournalEntry {
     fn new(date: NaiveDate) -> Self {
         Self { date, content: String::new(), mood: None }
     }
+}
+
+// Reflective starter questions shown as a pretext for empty journal entries.
+const JOURNAL_PROMPTS: &[&str] = &[
+    "What am I avoiding?",
+    "What is taking up most of my headspace?",
+    "What emotions am I avoiding?",
+    "What is my body telling me?",
+    "What matters most to me right now?",
+    "What do I need to change about my routine?",
+    "What brings me joy lately?",
+    "What can I do to show myself more love?",
+];
+
+fn journal_prompt_for_date(date: NaiveDate) -> &'static str {
+    let idx = (date.num_days_from_ce() as usize) % JOURNAL_PROMPTS.len();
+    JOURNAL_PROMPTS[idx]
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -2196,16 +2220,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
 
     // Ctrl+S: Save current editing content
     if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) && app.is_editing() {
-        // For inline edits, sync textarea first then save
-        if app.inline_edit_mode {
-            app.editing_input = app.textarea.lines().join("\n");
-            app.save_inline_edit();
-        } else {
-            app.editing_input = app.textarea.lines().join("\n");
-            app.save_input();
-        }
-        app.inline_edit_mode = false;
-        app.editing_input.clear();
+        commit_pending_edit(app);
         return Ok(false);
     }
 
@@ -2432,6 +2447,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
             // Check view mode buttons
             for (mode, rect) in app.view_mode_btns.clone() {
                 if inside_rect(mouse, rect) {
+                    // Commit any in-progress edit (same as Ctrl+S) before leaving the view,
+                    // instead of silently discarding unsaved content.
+                    commit_pending_edit(app);
                     app.view_mode = mode;
                     if matches!(mode, ViewMode::Journal) {
                         app.journal_view = JournalView::Entry;
@@ -2442,7 +2460,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
                     if matches!(mode, ViewMode::Kanban) {
                         app.kanban_view = KanbanView::Board;
                     }
-                    app.edit_target = EditTarget::None;
                     app.validate_indices();
                     return;
                 }
@@ -2666,10 +2683,8 @@ fn handle_journal_mouse_left(app: &mut App, mouse: MouseEvent) {
         if inside_rect(mouse, app.content_edit_area) && !app.is_editing() {
             let content = app.journal_entries.iter().find(|e| e.date == app.current_journal_date).map(|e| e.content.clone()).unwrap_or_default();
             let is_empty = content.is_empty();
+            let content = if is_empty { format!("Prompt: {}\n\n", journal_prompt_for_date(app.current_journal_date)) } else { content };
             start_editing(app, EditTarget::JournalEntry, content);
-            if is_empty {
-                app.textarea.move_cursor(CursorMove::Head);
-            }
         }
         return;
     }
@@ -3117,6 +3132,23 @@ fn delete_and_adjust_index<T>(items: &mut Vec<T>, current_idx: &mut usize) {
 
 fn save(app: &App) {
     let _ = save_app_data(app);
+}
+
+// Persist whatever is in the active editor buffer (same path Ctrl+S uses) before
+// closing the editor for any reason other than an explicit Esc cancel.
+fn commit_pending_edit(app: &mut App) {
+    if !app.is_editing() {
+        return;
+    }
+    app.editing_input = app.textarea.lines().join("\n");
+    if app.inline_edit_mode {
+        app.save_inline_edit();
+    } else {
+        app.save_input();
+    }
+    app.edit_target = EditTarget::None;
+    app.inline_edit_mode = false;
+    app.editing_input.clear();
 }
 
 fn matrix_key(code: KeyCode) -> Option<TaskMatrix> {
@@ -6056,7 +6088,10 @@ fn draw_journal_entry(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
     if app.is_editing() && matches!(app.edit_target, EditTarget::JournalEntry) {
         render_textarea_editor(frame, app, area, &format!("Journal Entry - {} (Ctrl+S to save, Esc to cancel)", app.current_journal_date));
     } else if entry.is_none() {
-        let help = "\nNotebook JOURNAL - DAILY REFLECTIONS\n\nFeatures:\n  - Write one entry per day\n  - Track your mood (optional)\n  - Navigate between dates\n  - Search entries by date\n\nHow to use:\n  1. Click the journal area to start writing\n  2. Type freely - your entry auto-saves\n  3. Use Prev/Next to navigate days\n  4. Click 'Today' to jump to current date\n\nOptional: Start with mood line:\n  Mood: happy/sad/reflective/motivated/etc\n\nTips Tips:\n  - Write regularly for best results\n  - No pressure to write long entries\n  - Past entries are always there to review";
+        let help = format!(
+            "\nNotebook JOURNAL - DAILY REFLECTIONS\n\nToday's prompt:\n  \"{}\"\n\nFeatures:\n  - Write one entry per day\n  - Track your mood (optional)\n  - Navigate between dates\n  - Search entries by date\n\nHow to use:\n  1. Click the journal area to start writing (the prompt above is prefilled)\n  2. Ctrl+S to save your entry, Esc to cancel\n  3. Use Prev/Next to navigate days\n  4. Click 'Today' to jump to current date\n\nOptional: Start with mood line:\n  Mood: happy/sad/reflective/motivated/etc\n\nTips Tips:\n  - Write regularly for best results\n  - No pressure to write long entries\n  - Past entries are always there to review",
+            journal_prompt_for_date(app.current_journal_date)
+        );
         frame.render_widget(Paragraph::new(help).block(Block::default().title(title).borders(Borders::ALL)).style(Style::default().fg(Color::Gray)), area);
     } else {
         let content = entry
@@ -6067,5 +6102,91 @@ fn draw_journal_entry(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
             })
             .unwrap_or_else(|| "(Click to write in your journal)".to_string());
         frame.render_widget(Paragraph::new(content).block(Block::default().title(title).borders(Borders::ALL)).wrap(Wrap { trim: false }), area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // MYNOTES_DATA_DIR is process-global state; serialize any test that (directly or via
+    // save_input/commit_pending_edit) ends up calling save_app_data, so tests can't race
+    // on the env var or step on each other's temp directories.
+    static DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_isolated_data_dir<F: FnOnce()>(f: F) {
+        let _guard = DATA_DIR_LOCK.lock().unwrap();
+        let suffix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let tmp = std::env::temp_dir().join(format!("mynotes_test_{}_{}", std::process::id(), suffix));
+        fs::create_dir_all(&tmp).unwrap();
+        env::set_var("MYNOTES_DATA_DIR", &tmp);
+        f();
+        env::remove_var("MYNOTES_DATA_DIR");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    fn click(rect: Rect) -> MouseEvent {
+        MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: rect.x + 1, row: rect.y, modifiers: KeyModifiers::NONE }
+    }
+
+    #[test]
+    fn switching_view_via_mouse_saves_pending_journal_edit() {
+        with_isolated_data_dir(|| {
+            let mut app = App::new();
+            app.view_mode = ViewMode::Journal;
+            app.journal_view = JournalView::Entry;
+            let today = app.current_journal_date;
+
+            start_editing(&mut app, EditTarget::JournalEntry, "Wrote something important".to_string());
+            assert!(app.is_editing());
+
+            // Simulate clicking the "Habits" tab in the top nav bar while the journal
+            // entry is still being edited (unsaved).
+            let habits_rect = Rect { x: 0, y: 0, width: 10, height: 1 };
+            app.view_mode_btns = vec![(ViewMode::Habits, habits_rect)];
+            handle_mouse(&mut app, click(habits_rect));
+
+            assert!(matches!(app.view_mode, ViewMode::Habits), "view should switch to Habits");
+            assert!(!app.is_editing(), "editor should be closed after switching views");
+
+            let saved = app.journal_entries.iter().find(|e| e.date == today);
+            assert_eq!(
+                saved.map(|e| e.content.as_str()),
+                Some("Wrote something important"),
+                "journal text typed before switching views must be saved, not discarded"
+            );
+        });
+    }
+
+    #[test]
+    fn switching_view_via_mouse_with_no_pending_edit_is_a_noop_for_data() {
+        with_isolated_data_dir(|| {
+            let mut app = App::new();
+            app.view_mode = ViewMode::Journal;
+            assert!(!app.is_editing());
+
+            let habits_rect = Rect { x: 0, y: 0, width: 10, height: 1 };
+            app.view_mode_btns = vec![(ViewMode::Habits, habits_rect)];
+            handle_mouse(&mut app, click(habits_rect));
+
+            assert!(matches!(app.view_mode, ViewMode::Habits));
+            assert!(app.journal_entries.is_empty());
+        });
+    }
+
+    #[test]
+    fn custom_dictionary_words_survive_save_and_load() {
+        with_isolated_data_dir(|| {
+            let mut app = App::new();
+            app.custom_words.insert("crossbowsec".to_string());
+            save_app_data(&app).expect("save should succeed");
+
+            let reloaded = load_app_data().expect("load should succeed");
+            assert!(
+                reloaded.custom_words.contains("crossbowsec"),
+                "words added to the custom spell-check dictionary must persist across restarts"
+            );
+        });
     }
 }
