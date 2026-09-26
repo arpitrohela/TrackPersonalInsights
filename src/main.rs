@@ -540,6 +540,30 @@ impl JournalEntry {
     }
 }
 
+// A journal entry may optionally start with "Mood: <text>" as its first line.
+// This pulls that out into the dedicated `mood` field so it's stored/searchable
+// separately, rather than just being inert text at the top of the entry.
+fn extract_mood_line(input: &str) -> (Option<String>, String) {
+    let mut lines = input.lines();
+    match lines.next() {
+        Some(first) if first.trim_start().to_lowercase().starts_with("mood:") => {
+            let mood = first.trim_start()[5..].trim().to_string();
+            let rest = lines.collect::<Vec<_>>().join("\n").trim_start_matches('\n').to_string();
+            if mood.is_empty() { (None, rest) } else { (Some(mood), rest) }
+        }
+        _ => (None, input.to_string()),
+    }
+}
+
+// Inverse of extract_mood_line: rebuild the editable text for an existing entry
+// so a set mood is visible and editable again, matching how it's displayed.
+fn prefix_mood_line(mood: Option<&str>, content: &str) -> String {
+    match mood {
+        Some(m) => format!("Mood: {}\n\n{}", m, content),
+        None => content.to_string(),
+    }
+}
+
 // Reflective starter questions shown as a pretext for empty journal entries.
 const JOURNAL_PROMPTS: &[&str] = &[
     "What am I avoiding?",
@@ -610,6 +634,16 @@ const HELP_TOPICS: &[HelpTopic] = &[
     HelpTopic { title: "Add Images & Files", detail: "Paste a full path (e.g., /home/you/Pictures/pic.png or ~/Pictures/pic.png). Markdown links [alt](~/path) and [alt][~/path] work too. Leave edit mode and click the line to open it with your system app." },
     HelpTopic { title: "Notes Section View", detail: "Click a section in the tree to read all its pages in one stream. Scroll to skim; pick a specific page to edit it." },
     HelpTopic { title: "Cloud Backup & Sync", detail: "I save to ~/.local/share/mynotes/{year}.bin. Upload that file to Drive/Dropbox/OneDrive to back up. Pull it down on another machine to continue where you left off." },
+    HelpTopic { title: "Task Editor Syntax", detail: "New Task opens a template with editable fields: Status (Pending|Completed), Matrix (Do|Schedule|Delegate|Eliminate|Unassigned), Due (YYYY-MM-DD), Reminder (YYYY-MM-DD or YYYY-MM-DD HH:MM, or 'None'), Repeat (none|daily|weekly|monthly|range YYYY-MM-DD to YYYY-MM-DD at HH:MM). Everything after 'Description:' is free text." },
+    HelpTopic { title: "Eisenhower Matrix", detail: "Do=Urgent+Important, Schedule=Important+Not Urgent, Delegate=Urgent+Not Important, Eliminate=Not Urgent+Not Important. Every new task/card starts Unassigned until you triage it with keys 1-4 or the Assign buttons in Matrix view. Planner's matrix and Kanban's matrix are separate: Planner is for planning life/events, Kanban is for moving individual tasks through workflow stages." },
+    HelpTopic { title: "Schedule Focus Panel", detail: "Only shows Schedule-quadrant items that actually have a due date, soonest first - it's a 'what's coming up' view, not every Schedule item. Undated Schedule items still show up in List/Board view." },
+    HelpTopic { title: "Habit Editor Syntax", detail: "New Habit template: Frequency (daily|weekly|monthly, or range YYYY-MM-DD to YYYY-MM-DD at HH:MM), Status (Active|Paused), Start Date (YYYY-MM-DD). Notes below are free text." },
+    HelpTopic { title: "Finance Entry Syntax", detail: "Category is free text (e.g. Food, Rent, Salary). Amount must be a positive number (e.g. 42.50). Date is YYYY-MM-DD. Notes below are free text." },
+    HelpTopic { title: "Calorie Entry Syntax", detail: "Meal is free text. Calories must be a whole number (e.g. 450). Date is YYYY-MM-DD. Notes below are free text." },
+    HelpTopic { title: "Kanban Card Syntax", detail: "Title/Matrix/Due/Note fields, same Matrix and Due format as tasks. Board view groups cards by stage (Todo/Doing/Done); Matrix view is Kanban's own, separate Eisenhower triage." },
+    HelpTopic { title: "Flashcard Syntax", detail: "New card template: Front, Back, Collection (optional grouping label). Reviews use spaced repetition (SM-2): press Space to reveal the answer, then rate 0-5 - lower ratings bring the card back sooner, higher ratings push its next review further out." },
+    HelpTopic { title: "Journal & Mistake Book", detail: "One entry per day, free text. Start an entry with a line like 'Mood: happy' to tag your mood separately - it's pulled out and shown above the entry instead of staying inline. New entries are prefilled with a rotating daily reflection prompt you can write past or delete." },
+    HelpTopic { title: "Notes Markdown Syntax", detail: "Page content supports '# Heading' (H1-H4), '**bold**', '*italic*', `inline code`, ``` fenced code blocks (with syntax highlighting by language), '-' bullet lists, and '>' blockquotes. Save with Ctrl+S to see it rendered; the editor itself shows raw markdown while you type." },
 ];
 
 #[derive(Clone)]
@@ -1195,14 +1229,17 @@ impl App {
             }
             EditTarget::JournalEntry => {
                 // Validate journal content length (max 50,000 characters)
-                let validated_content = if input.len() <= 50_000 { input.clone() } else { input.chars().take(50_000).collect() };
+                let validated_content: String = if input.len() <= 50_000 { input.clone() } else { input.chars().take(50_000).collect() };
+                let (mood, validated_content) = extract_mood_line(&validated_content);
 
                 // Find or create journal entry for current date
                 if let Some(entry) = self.journal_entries.iter_mut().find(|e| e.date == self.current_journal_date) {
                     entry.content = validated_content;
+                    entry.mood = mood;
                 } else {
                     let mut entry = JournalEntry::new(self.current_journal_date);
                     entry.content = validated_content;
+                    entry.mood = mood;
                     self.journal_entries.push(entry);
                 }
             }
@@ -2685,9 +2722,11 @@ fn handle_journal_mouse_left(app: &mut App, mouse: MouseEvent) {
             return;
         }
         if inside_rect(mouse, app.content_edit_area) && !app.is_editing() {
-            let content = app.journal_entries.iter().find(|e| e.date == app.current_journal_date).map(|e| e.content.clone()).unwrap_or_default();
-            let is_empty = content.is_empty();
-            let content = if is_empty { format!("Prompt: {}\n\n", journal_prompt_for_date(app.current_journal_date)) } else { content };
+            let entry = app.journal_entries.iter().find(|e| e.date == app.current_journal_date);
+            let content = match entry {
+                Some(e) if !e.content.is_empty() || e.mood.is_some() => prefix_mood_line(e.mood.as_deref(), &e.content),
+                _ => format!("Prompt: {}\n\n", journal_prompt_for_date(app.current_journal_date)),
+            };
             start_editing(app, EditTarget::JournalEntry, content);
         }
         return;
@@ -3845,11 +3884,11 @@ fn task_help_lines() -> Vec<Line<'static>> {
         Line::from("  7. Use Eisenhower Matrix view to assign quadrants"),
         Line::from(""),
         Line::from("Special syntax in task editor:"),
-        Line::from("  - Matrix: Do | Schedule | Delegate | Eliminate"),
-        Line::from("  - Reminder: 2025-12-25 09:00 or 2025-12-25"),
+        Line::from("  - Matrix: Do | Schedule | Delegate | Eliminate | Unassigned (new tasks start Unassigned until triaged)"),
+        Line::from("  - Reminder: 2025-12-25 09:00 or 2025-12-25 (leave as 'None' for no reminder)"),
         Line::from("  - Repeat: daily|weekly|monthly"),
         Line::from("  - Repeat range: range 2025-12-01 to 2025-12-31 at 08:00"),
-        Line::from("  - Due: 2025-12-31 (due date)"),
+        Line::from("  - Due: 2025-12-31 (due date; only dated Schedule tasks show in Schedule Focus)"),
         Line::from(""),
         Line::from("Middle-click toggles complete; Right-click deletes"),
     ]
@@ -3869,6 +3908,19 @@ fn recurrence_label(rec: Recurrence) -> String {
             }
         }
     }
+}
+
+// Strips a trailing "(e.g. ...)" / "(options: ...)" hint that a structured editor
+// template pre-fills as inline documentation, so leaving the hint untouched never
+// gets saved as if it were real user-entered data. A value that is *entirely* a
+// parenthetical hint (an untouched blank field) becomes empty, same as if the
+// user had cleared the line themselves.
+fn strip_editor_hint(value: &str) -> String {
+    let v = value.trim();
+    if v.starts_with('(') && v.ends_with(')') {
+        return String::new();
+    }
+    v.split(" (").next().unwrap_or("").trim().to_string()
 }
 
 fn task_matrix_label(matrix: TaskMatrix) -> &'static str {
@@ -3947,7 +3999,7 @@ fn format_task_editor_content(task: &Task) -> String {
 
 fn new_task_editor_template() -> String {
     let today = Local::now().date_naive();
-    format!("Title: \nStatus: Pending (options: Pending|Completed)\nMatrix: Unassigned (options: Do|Schedule|Delegate|Eliminate|Unassigned)\nCreated: {}\nDue: Not set\nReminder: None (e.g. 2025-12-25 09:30)\nRepeat: none (options: none|daily|weekly|monthly|range YYYY-MM-DD to YYYY-MM-DD at HH:MM)\n\nDescription:\n", today)
+    format!("Title: \nStatus: Pending (options: Pending|Completed)\nMatrix: Unassigned (options: Do|Schedule|Delegate|Eliminate|Unassigned)\nCreated: {}\nDue: Not set (e.g. 2025-12-31)\nReminder: None (e.g. 2025-12-25 09:30)\nRepeat: none (options: none|daily|weekly|monthly|range YYYY-MM-DD to YYYY-MM-DD at HH:MM)\n\nDescription:\n", today)
 }
 
 fn parse_task_editor_content(input: &str, existing: Option<&Task>, created_fallback: NaiveDate) -> Task {
@@ -4001,7 +4053,7 @@ fn parse_task_editor_content(input: &str, existing: Option<&Task>, created_fallb
                 }
             }
         } else if lower.starts_with("due:") {
-            let a = after();
+            let a = strip_editor_hint(&after());
             if a.eq_ignore_ascii_case("not set") || a.is_empty() {
                 due = None;
             } else if let Ok(d) = NaiveDate::parse_from_str(&a, "%Y-%m-%d") {
@@ -4010,7 +4062,7 @@ fn parse_task_editor_content(input: &str, existing: Option<&Task>, created_fallb
                 }
             }
         } else if lower.starts_with("reminder:") {
-            let a = after();
+            let a = strip_editor_hint(&after());
             if a.eq_ignore_ascii_case("none") || a.is_empty() || a.eq_ignore_ascii_case("not set") {
                 reminder_date = None;
                 reminder_time = None;
@@ -4416,7 +4468,7 @@ fn parse_and_validate_task(input: &str, existing: Option<&Task>) -> Result<Task,
 }
 
 fn new_finance_editor_template(selected_date: NaiveDate) -> String {
-    format!("Category: \nAmount: \nDate: {}\nNotes:\n", selected_date)
+    format!("Category: \nAmount: (e.g. 42.50)\nDate: {}\nNotes:\n", selected_date)
 }
 
 fn format_finance_editor_content(entry: &FinanceEntry) -> String {
@@ -4460,7 +4512,7 @@ fn parse_finance_editor_content(input: &str, existing: Option<&FinanceEntry>, de
         }
 
         if let Some(rest) = trimmed.strip_prefix("Amount:") {
-            let value = rest.trim();
+            let value = strip_editor_hint(rest);
             if !value.is_empty() {
                 if let Ok(amt) = value.parse::<f64>() {
                     // Validate amount: must be finite and within reasonable bounds
@@ -4527,7 +4579,7 @@ fn parse_finance_editor_content(input: &str, existing: Option<&FinanceEntry>, de
 }
 
 fn new_calorie_editor_template(selected_date: NaiveDate) -> String {
-    format!("Meal: \nCalories: \nDate: {}\nNotes:\n", selected_date)
+    format!("Meal: \nCalories: (e.g. 450)\nDate: {}\nNotes:\n", selected_date)
 }
 
 fn format_calorie_editor_content(entry: &CalorieEntry) -> String {
@@ -4571,7 +4623,7 @@ fn parse_calorie_editor_content(input: &str, existing: Option<&CalorieEntry>, de
         }
 
         if let Some(rest) = trimmed.strip_prefix("Calories:") {
-            let value = rest.trim();
+            let value = strip_editor_hint(rest);
             if !value.is_empty() {
                 if let Ok(cal) = value.parse::<u32>() {
                     // Validate calories: must be reasonable (max 50,000 per meal)
@@ -4638,7 +4690,7 @@ fn parse_calorie_editor_content(input: &str, existing: Option<&CalorieEntry>, de
 }
 
 fn new_kanban_editor_template() -> String {
-    "Title: \nMatrix: Unassigned (options: Do|Schedule|Delegate|Eliminate|Unassigned)\nDue: Not set\nNote:\n".to_string()
+    "Title: \nMatrix: Unassigned (options: Do|Schedule|Delegate|Eliminate|Unassigned)\nDue: Not set (e.g. 2025-12-31)\nNote:\n".to_string()
 }
 
 fn format_kanban_editor_content(card: &KanbanCard) -> String {
@@ -4689,10 +4741,10 @@ fn parse_kanban_editor_content(input: &str, existing: Option<&KanbanCard>) -> Op
         }
 
         if let Some(rest) = trimmed.strip_prefix("Due:") {
-            let value = rest.trim();
+            let value = strip_editor_hint(rest);
             if value.eq_ignore_ascii_case("not set") || value.is_empty() {
                 due = None;
-            } else if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+            } else if let Ok(date) = NaiveDate::parse_from_str(&value, "%Y-%m-%d") {
                 let max_date = Local::now().date_naive() + chrono::Duration::days(3650);
                 let min_date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
                 if date >= min_date && date <= max_date {
@@ -6244,5 +6296,65 @@ mod tests {
         ];
         let result = schedule_focus_order(items.into_iter());
         assert_eq!(result, vec![(3, today), (2, today + chrono::Duration::days(5))]);
+    }
+
+    #[test]
+    fn leaving_reminder_and_due_hints_untouched_means_no_reminder_or_due_date() {
+        // Regression: "Reminder: None (e.g. 2025-12-25 09:30)" left as-is used to be
+        // saved as literal reminder text instead of "no reminder".
+        let template = new_task_editor_template();
+        let created = parse_and_validate_task(&template, None).expect("template should validate as-is");
+        assert_eq!(created.reminder_date, None);
+        assert_eq!(created.reminder_text, None);
+        assert_eq!(created.due_date, None);
+    }
+
+    #[test]
+    fn typing_a_reminder_after_the_hint_still_parses() {
+        let future = today() + chrono::Duration::days(30);
+        let template = new_task_editor_template().replace("Reminder: None (e.g. 2025-12-25 09:30)", &format!("Reminder: {} 09:30 (e.g. 2025-12-25 09:30)", future));
+        let created = parse_and_validate_task(&template, None).expect("should validate");
+        assert_eq!(created.reminder_date, Some(future));
+    }
+
+    #[test]
+    fn finance_amount_hint_left_untouched_is_treated_as_missing() {
+        let template = new_finance_editor_template(today()).replace("Category: \n", "Category: Food\n");
+        assert!(parse_finance_editor_content(&template, None, today()).is_none(), "an untouched hint must not be saved as a real amount");
+    }
+
+    #[test]
+    fn finance_amount_typed_after_hint_still_parses() {
+        let template = new_finance_editor_template(today()).replace("Category: \n", "Category: Food\n").replace("Amount: (e.g. 42.50)", "Amount: 42.50 (e.g. 42.50)");
+        let entry = parse_finance_editor_content(&template, None, today()).expect("should parse");
+        assert_eq!(entry.amount, 42.5);
+    }
+
+    #[test]
+    fn calorie_count_hint_left_untouched_is_treated_as_missing() {
+        let template = new_calorie_editor_template(today()).replace("Meal: \n", "Meal: Lunch\n");
+        assert!(parse_calorie_editor_content(&template, None, today()).is_none(), "an untouched hint must not be saved as a real calorie count");
+    }
+
+    #[test]
+    fn mood_line_is_extracted_from_content_and_reconstructed_for_editing() {
+        assert_eq!(extract_mood_line("Mood: happy\n\nHad a great day"), (Some("happy".to_string()), "Had a great day".to_string()));
+        assert_eq!(extract_mood_line("Just a normal entry"), (None, "Just a normal entry".to_string()));
+        assert_eq!(prefix_mood_line(Some("happy"), "Had a great day"), "Mood: happy\n\nHad a great day");
+        assert_eq!(prefix_mood_line(None, "Had a great day"), "Had a great day");
+    }
+
+    #[test]
+    fn saving_a_journal_entry_with_a_mood_line_populates_the_mood_field() {
+        with_isolated_data_dir(|| {
+            let mut app = App::new();
+            app.edit_target = EditTarget::JournalEntry;
+            app.editing_input = "Mood: happy\n\nHad a great day".to_string();
+            app.save_input();
+
+            let entry = app.journal_entries.iter().find(|e| e.date == app.current_journal_date).expect("entry should be saved");
+            assert_eq!(entry.mood.as_deref(), Some("happy"));
+            assert_eq!(entry.content, "Had a great day");
+        });
     }
 }
