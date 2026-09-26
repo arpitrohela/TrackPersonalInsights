@@ -1,15 +1,358 @@
 use anyhow::Result;
 use chrono::{Datelike, Local, NaiveDate, NaiveTime};
 use crossterm::{event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind}, execute, terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen}};
+// Aliased to MdEvent: pulldown_cmark's Event would otherwise collide with
+// crossterm's Event (used for keyboard/mouse input) in this same file.
+use pulldown_cmark::{Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{backend::CrosstermBackend, layout::{Alignment, Constraint, Direction, Layout, Rect}, style::{Color, Modifier, Style, Stylize}, text::{Line, Span}, widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap}, Terminal};
-use std::{collections::{BTreeSet, HashSet}, env, fs, io, path::PathBuf, rc::Rc, time::{Duration, Instant}};
+use std::{collections::{BTreeSet, HashMap, HashSet}, env, fs, io, path::PathBuf, rc::Rc, time::{Duration, Instant}};
 use strsim::jaro_winkler;
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{FontStyle, Style as SyntectStyle, Theme, ThemeSet};
+use syntect::parsing::SyntaxSet;
 use tui_textarea::{CursorMove, Input, Key, TextArea};
 
-mod markdown_renderer;
-mod code_highlighter;
-
 const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024;
+
+// ============================================================================
+// Markdown rendering & code syntax highlighting (notes page content preview)
+// ============================================================================
+
+/// Syntax highlighter for fenced code blocks.
+///
+/// The `SyntaxSet` and `Theme` are loaded once at construction time and reused
+/// for every call, since building them from scratch is expensive and this
+/// runs on the render hot path.
+#[derive(Clone)]
+struct CodeHighlighter {
+    syntax_set: SyntaxSet,
+    theme: Theme,
+}
+
+impl CodeHighlighter {
+    fn new() -> Self {
+        let theme_set = ThemeSet::load_defaults();
+        let theme = theme_set
+            .themes
+            .get("Solarized (dark)")
+            .or_else(|| theme_set.themes.get("base16-ocean.dark"))
+            .cloned()
+            .unwrap_or_else(|| theme_set.themes.values().next().unwrap().clone());
+
+        Self {
+            syntax_set: SyntaxSet::load_defaults_newlines(),
+            theme,
+        }
+    }
+
+    /// Highlight a code block, returning one `Line` per source line so the
+    /// caller can render it directly without re-splitting on newlines.
+    fn highlight_lines(&self, code: &str, language: &str) -> Vec<Line<'static>> {
+        let syntax = self
+            .syntax_set
+            .find_syntax_by_token(language)
+            .or_else(|| self.syntax_set.find_syntax_by_extension(language))
+            .or_else(|| self.syntax_set.find_syntax_by_first_line(code))
+            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
+
+        let mut highlighter = HighlightLines::new(syntax, &self.theme);
+        let mut lines = Vec::new();
+
+        for line in code.lines() {
+            match highlighter.highlight_line(line, &self.syntax_set) {
+                Ok(regions) => {
+                    let spans: Vec<Span<'static>> = regions
+                        .into_iter()
+                        .map(|(style, text)| {
+                            Span::styled(text.to_string(), Self::syntect_to_ratatui_style(style))
+                        })
+                        .collect();
+                    lines.push(Line::from(spans));
+                }
+                Err(_) => lines.push(Line::from(Span::raw(line.to_string()))),
+            }
+        }
+
+        lines
+    }
+
+    fn syntect_to_ratatui_style(style: SyntectStyle) -> Style {
+        let mut out = Style::default().fg(Color::Rgb(
+            style.foreground.r,
+            style.foreground.g,
+            style.foreground.b,
+        ));
+
+        if style.font_style.contains(FontStyle::BOLD) {
+            out = out.add_modifier(Modifier::BOLD);
+        }
+        if style.font_style.contains(FontStyle::ITALIC) {
+            out = out.add_modifier(Modifier::ITALIC);
+        }
+        if style.font_style.contains(FontStyle::UNDERLINE) {
+            out = out.add_modifier(Modifier::UNDERLINED);
+        }
+
+        out
+    }
+}
+
+impl Default for CodeHighlighter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Tracks the kind of list we're inside so items get the right marker.
+enum ListKind {
+    /// Ordered list with the next item number.
+    Ordered(u64),
+    Unordered,
+}
+
+#[derive(Clone)]
+struct MarkdownRenderer {
+    cache: HashMap<String, Vec<Line<'static>>>,
+}
+
+impl MarkdownRenderer {
+    fn new() -> Self {
+        Self {
+            cache: HashMap::new(),
+        }
+    }
+
+    /// Convert a markdown string into renderable Ratatui lines.
+    ///
+    /// Results are cached by content. The cache is bounded to avoid unbounded
+    /// growth as the user types.
+    fn render(&mut self, content: &str, highlighter: &CodeHighlighter) -> Vec<Line<'static>> {
+        if let Some(cached) = self.cache.get(content) {
+            return cached.clone();
+        }
+
+        let mut options = Options::empty();
+        options.insert(Options::ENABLE_STRIKETHROUGH);
+        let parser = Parser::new_ext(content, options);
+        let lines = Self::parse_events(parser, highlighter);
+
+        if self.cache.len() > 100 {
+            self.cache.clear();
+        }
+        self.cache.insert(content.to_string(), lines.clone());
+        lines
+    }
+
+    fn parse_events(parser: Parser, highlighter: &CodeHighlighter) -> Vec<Line<'static>> {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut current: Vec<Span<'static>> = Vec::new();
+
+        // Stack of styles for nested inline formatting (bold, italic, etc.).
+        let mut style_stack: Vec<Style> = Vec::new();
+        // Stack of active lists for nesting + numbering.
+        let mut list_stack: Vec<ListKind> = Vec::new();
+        // Blockquote nesting depth.
+        let mut quote_depth: usize = 0;
+
+        let mut in_code_block = false;
+        let mut code_language = String::new();
+        let mut code_content = String::new();
+
+        // Combine the style stack into a single effective style.
+        let effective_style = |stack: &[Style]| -> Style {
+            let mut s = Style::default();
+            for layer in stack {
+                s = s.patch(*layer);
+            }
+            s
+        };
+
+        let flush = |lines: &mut Vec<Line<'static>>, current: &mut Vec<Span<'static>>| {
+            if !current.is_empty() {
+                lines.push(Line::from(std::mem::take(current)));
+            }
+        };
+
+        for event in parser {
+            match event {
+                MdEvent::Start(Tag::Heading { level, .. }) => {
+                    flush(&mut lines, &mut current);
+                    let color = match level {
+                        HeadingLevel::H1 => Color::Blue,
+                        HeadingLevel::H2 => Color::Cyan,
+                        HeadingLevel::H3 => Color::Green,
+                        _ => Color::Yellow,
+                    };
+                    style_stack.push(Style::default().fg(color).add_modifier(Modifier::BOLD));
+                    let prefix = "#".repeat(heading_number(level));
+                    current.push(Span::styled(
+                        format!("{} ", prefix),
+                        effective_style(&style_stack),
+                    ));
+                }
+                MdEvent::End(TagEnd::Heading(_)) => {
+                    style_stack.pop();
+                    flush(&mut lines, &mut current);
+                    lines.push(Line::from(""));
+                }
+
+                MdEvent::Start(Tag::CodeBlock(kind)) => {
+                    flush(&mut lines, &mut current);
+                    in_code_block = true;
+                    code_language = match kind {
+                        pulldown_cmark::CodeBlockKind::Fenced(lang) => lang.to_string(),
+                        pulldown_cmark::CodeBlockKind::Indented => String::new(),
+                    };
+                    code_content.clear();
+                }
+                MdEvent::End(TagEnd::CodeBlock) => {
+                    in_code_block = false;
+                    let label = if code_language.is_empty() {
+                        "┌─ code ─".to_string()
+                    } else {
+                        format!("┌─ {} ─", code_language)
+                    };
+                    lines.push(Line::from(Span::styled(
+                        label,
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                    for hl in highlighter.highlight_lines(&code_content, &code_language) {
+                        lines.push(hl);
+                    }
+                    lines.push(Line::from(Span::styled(
+                        "└─────────",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                    code_content.clear();
+                }
+
+                MdEvent::Code(code) => {
+                    let style = effective_style(&style_stack)
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::DIM);
+                    current.push(Span::styled(format!("`{}`", code), style));
+                }
+
+                MdEvent::Start(Tag::Strong) => {
+                    style_stack.push(Style::default().add_modifier(Modifier::BOLD));
+                }
+                MdEvent::End(TagEnd::Strong) => {
+                    style_stack.pop();
+                }
+                MdEvent::Start(Tag::Emphasis) => {
+                    style_stack.push(Style::default().add_modifier(Modifier::ITALIC));
+                }
+                MdEvent::End(TagEnd::Emphasis) => {
+                    style_stack.pop();
+                }
+                MdEvent::Start(Tag::Strikethrough) => {
+                    style_stack.push(Style::default().add_modifier(Modifier::CROSSED_OUT));
+                }
+                MdEvent::End(TagEnd::Strikethrough) => {
+                    style_stack.pop();
+                }
+
+                MdEvent::Text(text) => {
+                    if in_code_block {
+                        code_content.push_str(&text);
+                    } else {
+                        current.push(Span::styled(text.to_string(), effective_style(&style_stack)));
+                    }
+                }
+
+                MdEvent::SoftBreak | MdEvent::HardBreak => {
+                    flush(&mut lines, &mut current);
+                }
+
+                MdEvent::Start(Tag::List(start)) => {
+                    list_stack.push(match start {
+                        Some(n) => ListKind::Ordered(n),
+                        None => ListKind::Unordered,
+                    });
+                }
+                MdEvent::End(TagEnd::List(_)) => {
+                    list_stack.pop();
+                }
+                MdEvent::Start(Tag::Item) => {
+                    flush(&mut lines, &mut current);
+                    let depth = list_stack.len().saturating_sub(1);
+                    let indent = "  ".repeat(depth);
+                    let marker = match list_stack.last_mut() {
+                        Some(ListKind::Ordered(n)) => {
+                            let m = format!("{}. ", n);
+                            *n += 1;
+                            m
+                        }
+                        _ => "• ".to_string(),
+                    };
+                    current.push(Span::styled(
+                        format!("{}{}", indent, marker),
+                        Style::default().fg(Color::Yellow),
+                    ));
+                }
+                MdEvent::End(TagEnd::Item) => {
+                    flush(&mut lines, &mut current);
+                }
+
+                MdEvent::Start(Tag::BlockQuote(_)) => {
+                    quote_depth += 1;
+                    flush(&mut lines, &mut current);
+                    current.push(Span::styled(
+                        "║ ".repeat(quote_depth),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                    style_stack
+                        .push(Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC));
+                }
+                MdEvent::End(TagEnd::BlockQuote) => {
+                    style_stack.pop();
+                    quote_depth = quote_depth.saturating_sub(1);
+                    flush(&mut lines, &mut current);
+                }
+
+                MdEvent::Start(Tag::Paragraph) => {
+                    flush(&mut lines, &mut current);
+                }
+                MdEvent::End(TagEnd::Paragraph) => {
+                    flush(&mut lines, &mut current);
+                    if list_stack.is_empty() {
+                        lines.push(Line::from(""));
+                    }
+                }
+
+                MdEvent::Rule => {
+                    flush(&mut lines, &mut current);
+                    lines.push(Line::from(Span::styled(
+                        "─".repeat(40),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+
+                _ => {}
+            }
+        }
+
+        flush(&mut lines, &mut current);
+        lines
+    }
+}
+
+impl Default for MarkdownRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn heading_number(level: HeadingLevel) -> usize {
+    match level {
+        HeadingLevel::H1 => 1,
+        HeadingLevel::H2 => 2,
+        HeadingLevel::H3 => 3,
+        HeadingLevel::H4 => 4,
+        HeadingLevel::H5 => 5,
+        HeadingLevel::H6 => 6,
+    }
+}
 
 fn today() -> NaiveDate { Local::now().date_naive() }
 
@@ -818,8 +1161,8 @@ struct App {
     spell_check_scroll: u16,
     custom_words: HashSet<String>,
     // Editor: live markdown rendering + code syntax highlighting
-    markdown_renderer: markdown_renderer::MarkdownRenderer,
-    code_highlighter: code_highlighter::CodeHighlighter,
+    markdown_renderer: MarkdownRenderer,
+    code_highlighter: CodeHighlighter,
 }
 
 fn default_notebook() -> Notebook {
@@ -1010,8 +1353,8 @@ impl App {
             mistake_log_btn: rect,
             search_btn: rect,
             // Editor: live markdown rendering + code syntax highlighting
-            markdown_renderer: markdown_renderer::MarkdownRenderer::new(),
-            code_highlighter: code_highlighter::CodeHighlighter::new(),
+            markdown_renderer: MarkdownRenderer::new(),
+            code_highlighter: CodeHighlighter::new(),
         }
     }
 
