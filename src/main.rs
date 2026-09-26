@@ -907,8 +907,11 @@ fn prefix_mood_line(mood: Option<&str>, content: &str) -> String {
     }
 }
 
-// Reflective starter questions shown as a pretext for empty journal entries.
+// Reflective/productive starter questions shown as a pretext for empty journal
+// entries. Rotates daily via journal_prompt_for_date(). Mixes short reflective
+// questions with titled "do this, here's why" challenges.
 const JOURNAL_PROMPTS: &[&str] = &[
+    // Short reflective questions
     "What am I avoiding?",
     "What is taking up most of my headspace?",
     "What emotions am I avoiding?",
@@ -917,6 +920,23 @@ const JOURNAL_PROMPTS: &[&str] = &[
     "What do I need to change about my routine?",
     "What brings me joy lately?",
     "What can I do to show myself more love?",
+    // Titled productivity/discipline challenges
+    "The Silent Mornings: Give yourself 30 minutes of zero input after waking - no phone, no talking, no noise. Whoever controls your first thought controls your whole day.",
+    "The Ownership Rule: Stop blaming circumstances and ask 'what's my move here.' Victims wait for things to change, builders change things.",
+    "The Energy Audit: What drained you today - people, habits, scrolling, complaining? You can't fix a leak you've never actually located.",
+    "The Hard Choice First: Did you do the thing you were avoiding before anything easy today? Momentum comes from difficulty, not from warming up on easy tasks.",
+    "The Comparison Delete: Stop checking where others are in life and check where you were 90 days ago. Your only real competition is last month's version of you.",
+    "The No Excuse Zone: Where did 'I don't have time' show up today, and what did you actually prioritize instead? You have time - you just haven't chosen it yet.",
+    "The Discomfort Log: What's one uncomfortable thing you did on purpose today? If this is empty most days, you're growing slower than you think.",
+    "The Future Letter: Write a short note to yourself 90 days from now. People who see their future self clearly make better decisions today.",
+    "The Keystone Habit: What's the one habit that, if you nailed it today, would make everything else easier? One good habit fixed often fixes five bad ones for free.",
+    "The Values Check: Where did you act today according to what you actually value, and where did you just react? Alignment feels like calm; misalignment feels like static you can't quite name.",
+    "The Three Good Things: Name three things that went right today and why they went right. Gratitude aimed at causes, not just outcomes, teaches you how to repeat them.",
+    "The Worthy Struggle: What's one thing you did today that you'd have avoided a year ago? Growth is invisible day-to-day - it only shows up when you compare eras, not hours.",
+    "The Honest Ledger: Where did you fall short today, without excuses attached? Naming it without punishing yourself is the only kind of honesty that actually changes behavior.",
+    "The Someone Else Question: Who did you help, listen to, or make life easier for today? A day measured only in personal wins is smaller than one measured in impact on others.",
+    "The Delay Test: What did you want right now today, and did you let yourself wait for it? Every delayed impulse is a small deposit into the person you're trying to become.",
+    "The Release: What are you still carrying from today that has nowhere useful left to go? Naming it on the page is often the only way to actually put it down before sleep.",
 ];
 
 fn journal_prompt_for_date(date: NaiveDate) -> &'static str {
